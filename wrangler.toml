@@ -1,0 +1,29 @@
+# doubleyoup media Worker — serves the doubleyoup-media R2 bucket for the shared
+# host and (via Cloudflare for SaaS) branded customer hostnames.
+#
+# Deploy (needs wrangler auth to the doubleyoup Cloudflare account):
+#   1. wrangler r2 bucket create doubleyoup-media  # skip if it already exists
+#   2. wrangler kv namespace create HOSTMAP        # copy the id below
+#   3. wrangler deploy
+#   4. Cloudflare dashboard: enable "Cloudflare for SaaS" (Custom Hostnames) on the
+#      zone; set the fallback origin + attach custom hostnames to this Worker so
+#      media.<customer> requests hit it. (Shared media.doubleyoup.com stays a direct
+#      R2 custom domain — do NOT also route the Worker there; pick one per host.)
+#
+# Onboarding a branded host (orchestrator, later): create the CF custom hostname +
+#   `wrangler kv key put --binding=HOSTMAP media.<customer> <slug>` (or via API).
+
+name = "doubleyoup-media"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+SHARED_HOST = "media.doubleyoup.com"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "doubleyoup-media"
+
+[[kv_namespaces]]
+binding = "HOSTMAP"
+id = "REPLACE_WITH_KV_ID"   # from `wrangler kv namespace create HOSTMAP`
