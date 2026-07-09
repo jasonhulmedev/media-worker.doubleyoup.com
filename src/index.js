@@ -41,8 +41,10 @@ const EXPOSED_HEADERS = "content-length, content-range, etag, accept-ranges";
 // Worker fetches with the account read credential — validate its charset before
 // trusting it, whether it came from the path (shared host) or KV (branded host).
 // Mirrors the platform's slug rules (lowercase alnum + hyphen); also keeps the
-// resulting bucket name inside R2's naming constraints.
-const SLUG_PATTERN = /^[a-z0-9-]{1,50}$/;
+// resulting bucket name inside R2's naming constraints. Capped at 46 so the derived
+// bucket "doubleyoup-media-<slug>" (17-char prefix + slug) stays within R2's 63-char
+// bucket-name limit; this matches app's uniqueSlug cap (<=46 chars).
+const SLUG_PATTERN = /^[a-z0-9-]{1,46}$/;
 
 // The R2 S3 endpoint uses SigV4 with region "auto" and service "s3" (path-style),
 // exactly matching the doubleyoup-media mu-plugin's proven write-side signer.
