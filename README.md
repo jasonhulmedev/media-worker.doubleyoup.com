@@ -1,8 +1,11 @@
 # media-worker.doubleyoup.com
 
-Cloudflare Worker that serves the `doubleyoup-media` R2 bucket as public,
-cacheable media — the sole read path for every site's offloaded media on the
-doubleyoup platform. Handles two host shapes with one R2 key scheme
+Cloudflare Worker that serves each site's **own** R2 bucket
+(`doubleyoup-media-<slug>`) as public, cacheable media — the sole read path for
+every site's offloaded media on the doubleyoup platform (H1 per-site isolation).
+There is no static R2 binding: the bucket is derived from the resolved slug and
+read with a SigV4-signed S3 GET using one account-scoped, Object-Read-ONLY R2
+credential (Worker secrets). Handles two host shapes with one R2 key scheme
 (`<slug>/<path>`):
 
 1. **Shared host** — `media.doubleyoup.com/<slug>/<path>`. The slug is already
@@ -18,19 +21,21 @@ Cloudflare's edge.
 
 Only `GET`/`HEAD` are accepted (405 otherwise). Responses honor conditional
 requests (`If-None-Match` → 304) and `Range` requests (→ 206 with
-`Content-Range`) by passing `request.headers` straight through to R2's own
-`onlyIf`/`range` option handling. A long immutable `Cache-Control` is set on
+`Content-Range`) by forwarding — and signing — those headers on the S3 GET so R2
+applies the semantics itself and returns the status this Worker maps back. A long
+immutable `Cache-Control` is set on
 hits, a short one on 404s (so a bad/unknown path or host doesn't hammer
 KV/R2 on every repeat request), and every response — including errors —
 carries permissive read CORS since this only ever serves public assets.
 
 ## Bindings (`wrangler.toml`)
 
-| Binding       | Type         | Purpose                                                          |
-| ------------- | ------------ | ----------------------------------------------------------------- |
-| `BUCKET`      | R2 bucket    | `doubleyoup-media` — one object per file, key = `<slug>/<path>`  |
-| `HOSTMAP`     | KV namespace | branded hostname → slug lookup                                   |
-| `SHARED_HOST` | var          | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
+| Binding                      | Type           | Purpose                                                          |
+| ---------------------------- | -------------- | ----------------------------------------------------------------- |
+| `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one account-scoped, **Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of every per-site `doubleyoup-media-<slug>` bucket (`wrangler secret put`) |
+| `R2_ACCOUNT_ID`              | var            | Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` |
+| `HOSTMAP`                    | KV namespace   | branded hostname → slug lookup                                   |
+| `SHARED_HOST`                | var            | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
 
 ## Local dev
 
@@ -44,15 +49,16 @@ npm run dev        # wrangler dev
 
 ## Deploy
 
-1. Create the R2 bucket (skip if it already exists):
-   ```
-   wrangler r2 bucket create doubleyoup-media
-   ```
-2. Create the KV namespace and paste the returned `id` into the
+1. Create the KV namespace and paste the returned `id` into the
    `[[kv_namespaces]]` block in `wrangler.toml` (replacing
    `REPLACE_WITH_KV_ID` — this id is per-account and not committed pre-filled):
    ```
    wrangler kv namespace create HOSTMAP
+   ```
+2. Set `R2_ACCOUNT_ID` under `[vars]` and add the read credential secrets:
+   ```
+   wrangler secret put R2_S3_KEY      # account-scoped R2 token access key id (Object Read only)
+   wrangler secret put R2_S3_SECRET   # its secret access key
    ```
 3. Confirm `SHARED_HOST` under `[vars]` matches the shared media host.
 4. Deploy:
@@ -61,9 +67,15 @@ npm run dev        # wrangler dev
    ```
 5. In the Cloudflare dashboard, enable **Cloudflare for SaaS** (Custom
    Hostnames) on the zone and set its fallback origin / Worker route so that
-   branded `media.<customer>` hostnames route to this Worker. Leave the
-   shared `media.doubleyoup.com` host on a direct R2 custom domain — don't
-   also route the Worker there; pick one path per host.
+   branded `media.<customer>` hostnames route to this Worker.
+
+**Gated prerequisites (Jason) before the shared host is served here:** this Worker
+targets the end state where it serves `media.doubleyoup.com` too, but that requires
+(a) the per-site `doubleyoup-media-<slug>` buckets existing + migrated and (b)
+re-routing `media.doubleyoup.com` off its current direct-R2-custom-domain binding
+onto this Worker (a zone change, per-slug flippable during migration). Until then
+the shared host keeps serving the single legacy bucket directly and only branded
+hostnames route here.
 
 ### Onboarding a branded host
 
