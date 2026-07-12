@@ -89,13 +89,15 @@ curl -s -X POST -H "Authorization: Bearer $CF_TOKEN" -H 'Content-Type: applicati
   -d '{"pattern":"'"$HN"'/*","script":"doubleyoup-media"}'
 ```
 
-### Step 3 is GATED on token scope
+### Step 3 token scope
 
-The current Cloudflare API token can create custom hostnames + KV + Worker scripts,
-but **lacks `Workers Routes:Edit`** (POST/GET `/zones/{zone}/workers/routes` →
-`Authentication error` 10000). Add that scope to the token (or create the route in
-the dashboard: Workers Routes → Add route → `media.rareepicgamer.zone/*` →
-`doubleyoup-media`) before the branded host can reach the Worker.
+Needs `Workers Routes:Edit` on the token. (The token initially lacked it —
+`Authentication error` 10000 — and was later granted the scope.) rareepicgamer's
+route is live: `media.rareepicgamer.zone/*` → `doubleyoup-media`
+(id `4f7f4155c3294ed2b2cab4ce323ab682`), and it is the ONLY route in the zone (no
+`*/*`). The specific route IS invoked for the SaaS custom hostname (confirmed by a
+real `https://media.rareepicgamer.zone/...` 200), so the customer-DNS caveat above
+did not bite here.
 
 ### Customer DNS caveat (bounded, fail-safe)
 
@@ -135,35 +137,58 @@ image/jpeg / 4740 bytes / sha256 `ddd7382d…` — byte-identical to
 Also 404 (unknown object), 206 (`Range: bytes=0-99` → `content-range: …/4740`),
 HEAD 200, `If-None-Match` → 304, POST → 405.
 
-## LIVE FLIP (supervised — NOT yet done)
+## LIVE FLIP (DONE for rareepicgamer 2026-07-12)
 
 Do this ONLY after: customer CNAME added → custom hostname `ssl_status=active` →
 route created (token scope) → a real `https://media.rareepicgamer.zone/...` fetch
-returns 200 with matching bytes.
+returns 200 with matching bytes. All confirmed for rareepicgamer, then flipped.
 
 The site reads its media base from a PHP constant (see the `doubleyoup-media`
 mu-plugin `doubleyoup_r2_media_base()`):
 - Unset (today): `https://media.doubleyoup.com/rareepicgamer-19f933` (shared host).
 - Branded: `https://media.rareepicgamer.zone` (NO slug — the Worker prepends it).
 
-Flip: as the site's OS user on the file node, edit
-`/platform/rareepicgamer-19f933/wp-config-real.php` and add/point the constant:
+Flip: edit `/platform/<slug>/wp-config-real.php` **ON THE FILE NODE**
+(`dy-file-syd-1`) — the file is `root:site_<slug>` mode `640` and `/platform` is
+root-squashed + read-only over NFS on the web node, so it must be changed locally
+on the file node as root. Change the existing line (it is already defined, pointing
+at the shared host):
 ```php
 define('DOUBLEYOUP_R2_MEDIA_BASE', 'https://media.rareepicgamer.zone');
 ```
-Then (optionally) rewrite existing content URLs:
-`wp search-replace 'https://media.doubleyoup.com/rareepicgamer-19f933' 'https://media.rareepicgamer.zone' --precise --all-tables`.
+Preserve owner/group/mode — do NOT `sed -i` (that can reset the group and cut the
+php-fpm pool's read access → site down). Rewrite the content in place instead
+(`sed ... > tmp; cat tmp > file`) after `cp -p` backup. `php -l` the result.
 
-Verify: load the site, confirm `<img>`/srcset point at `media.rareepicgamer.zone`
-and return 200 with the right content-type; check a fresh upload round-trips.
+**Then bust opcache on the WEB NODE (`dy-web-syd-1`) — REQUIRED.** Even with
+`opcache.validate_timestamps=1`, the storage-tier NFS mount uses `nocto` +
+`acregmax=600`, so php-fpm keeps serving the OLD compiled `wp-config-real.php` for
+up to ~10 min. `opcache-bust.php` only accepts `/sites/` paths, and the docroot
+root isn't writable by the site user, so the clean fix is a graceful reload:
+```
+sudo systemctl reload php8.2-fpm     # SIGUSR2, zero dropped requests, clears opcache SHM
+```
+(Confirmed: origin flipped from `media.doubleyoup.com` → `media.rareepicgamer.zone`
+immediately after the reload.) Optionally rewrite hard-stored content URLs:
+`wp search-replace 'https://media.doubleyoup.com/rareepicgamer-19f933' 'https://media.rareepicgamer.zone' --precise --all-tables`
+(not needed here — the mu-plugin rewrites upload URLs at render time).
 
-Rollback: remove the `DOUBLEYOUP_R2_MEDIA_BASE` line (falls back to
-`media.doubleyoup.com/<slug>`), reverse the search-replace if run. R2 objects and
-the shared host are untouched by the flip, so rollback is immediate and lossless.
+Verify: `curl https://rareepicgamer.zone/` shows `media.rareepicgamer.zone` URLs
+(0 `media.doubleyoup.com`), each resolves 200 with the right content-type, and the
+shared host still serves.
+
+Rollback (immediate, lossless — R2 objects + the shared host are untouched):
+restore the `.bak-mediaflip-*` backup written next to the file (or set the constant
+back to `https://media.doubleyoup.com/<slug>`) on the file node, then
+`sudo systemctl reload php8.2-fpm` on the web node. Reverse the search-replace if
+it was run.
 
 ## Follow-ons
 
-- Add `Workers Routes:Edit` to the CF token (unblocks step 3 / route automation).
-- Mint an Object-Read-ONLY R2 token; re-`secret put` `R2_S3_KEY`/`R2_S3_SECRET`.
-- Fold KV-entry + custom-hostname + route creation into the orchestrator's domain
-  automation so branded media onboards with the site's other custom domains.
+- Mint an Object-Read-ONLY R2 token; re-`secret put` `R2_S3_KEY`/`R2_S3_SECRET`
+  (today the Worker holds the shared platform R2 key).
+- Fold KV-entry + custom-hostname + route creation + the post-flip php-fpm reload
+  into the orchestrator's domain automation so branded media onboards (and flips)
+  with the site's other custom domains. (`Workers Routes:Edit` is now on the token.)
+- Consider dropping the `nocto`/`acregmax=600` opcache-vs-NFS staleness to a
+  documented "reload after any wp-config edit" step in the storage-tier runbook.
