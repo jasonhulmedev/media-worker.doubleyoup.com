@@ -4,11 +4,16 @@
 # slug and reads it with a SigV4-signed S3 GET using one account-scoped,
 # Object-Read-ONLY R2 credential (Worker secrets, below).
 #
-# Secrets (NOT committed — set with `wrangler secret put`; Jason supplies values):
-#   wrangler secret put R2_S3_KEY      # account-scoped R2 token access key id (Object Read only)
+# Secrets (NOT committed — set with `wrangler secret put`; values come from the
+# platform R2 credential in the constellation .env, never printed):
+#   wrangler secret put R2_ACCOUNT_ID  # Cloudflare account id (R2 S3 endpoint host)
+#   wrangler secret put R2_S3_KEY      # R2 S3 access key id (read path)
 #   wrangler secret put R2_S3_SECRET   # its secret access key
-# Var R2_ACCOUNT_ID (below) is the Cloudflare account id used in the R2 S3 endpoint
-# host <account-id>.r2.cloudflarestorage.com — not secret (it's in every request host).
+# R2_ACCOUNT_ID is a secret (not a committed var) purely to keep account ids out of
+# the repo; the code reads env.R2_ACCOUNT_ID whether it's a var or a secret.
+#
+# TODAY the read credential is the SHARED platform R2 key (bucket-scoped, not read-only).
+# FOLLOW-ON: mint a dedicated Object-Read-ONLY R2 token and re-`secret put` these two.
 #
 # Deploy (needs wrangler auth to the doubleyoup Cloudflare account):
 #   1. wrangler kv namespace create HOSTMAP        # copy the id below (once per account)
@@ -32,10 +37,19 @@ name = "doubleyoup-media"
 main = "src/index.js"
 compatibility_date = "2026-01-01"
 
+# No [[routes]] / no `route` here on purpose: this deploy publishes to workers.dev
+# ONLY. doubleyoup.com is a SHARED platform zone, so a `*/*` route would send every
+# in-zone host (app, every site, media.doubleyoup.com, status...) through this Worker
+# and 404 them. Branded hosts are attached out-of-band with a SPECIFIC per-hostname
+# Worker route (media.<customer>/*) — see recipes/branded-media.md. The shared host
+# media.doubleyoup.com stays on its own direct r2.dev path and is NOT routed here.
+
 [vars]
 SHARED_HOST = "media.doubleyoup.com"
-R2_ACCOUNT_ID = "REPLACE_WITH_R2_ACCOUNT_ID"   # Cloudflare account id (R2 S3 endpoint host)
+# MEDIA_BUCKET pins every slug to the single shared bucket (the platform's current
+# state). Remove it once per-site "doubleyoup-media-<slug>" buckets are the source.
+MEDIA_BUCKET = "doubleyoup-media"
 
 [[kv_namespaces]]
 binding = "HOSTMAP"
-id = "REPLACE_WITH_KV_ID"   # from `wrangler kv namespace create HOSTMAP`
+id = "8c2b24a66e79416f81f646f90683e5c4"   # HOSTMAP (doubleyoup CF account)

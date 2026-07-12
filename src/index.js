@@ -339,7 +339,12 @@ export default {
       if (!key) return notFound(method);
       if (!SLUG_PATTERN.test(slug)) return notFound(method);
 
-      const bucket = `doubleyoup-media-${slug}`;
+      // Bucket source. The H1 end state is one bucket PER site ("doubleyoup-media-<slug>").
+      // But the platform still runs the ORIGINAL single shared bucket today, so the
+      // MEDIA_BUCKET var (when set, e.g. "doubleyoup-media") pins every slug to that one
+      // bucket. The <slug>/<path> KEY scheme is unchanged either way, so the shared host
+      // and a branded host resolve the exact same objects. Unset => per-site (H1).
+      const bucket = env.MEDIA_BUCKET || `doubleyoup-media-${slug}`;
 
       // Read credential is an account-scoped, Object-Read-ONLY R2 token held as a
       // Worker secret (never in a tenant container). Absent config => not live yet.
