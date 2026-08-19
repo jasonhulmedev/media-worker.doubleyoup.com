@@ -1,8 +1,9 @@
 # doubleyoup media Worker — serves PER-SITE R2 buckets ("doubleyoup-media-<slug>")
-# for the shared host and (via Cloudflare for SaaS) branded customer hostnames.
-# There is NO static R2 binding: the Worker derives the bucket from the resolved
-# slug and reads it with a SigV4-signed S3 GET using one account-scoped,
-# Object-Read-ONLY R2 credential (Worker secrets, below).
+# for the shared host and (via Cloudflare for SaaS) branded customer hostnames, with
+# an automatic fallback to the shared legacy bucket for sites not migrated yet.
+# There is NO static R2 binding: the Worker derives the bucket names from the resolved
+# slug and reads them with a SigV4-signed S3 GET using one Object-Read-ONLY R2
+# credential (Worker secrets, below).
 #
 # Secrets (NOT committed — set with `wrangler secret put`; values come from the
 # platform R2 credential in the constellation .env, never printed):
@@ -12,8 +13,14 @@
 # R2_ACCOUNT_ID is a secret (not a committed var) purely to keep account ids out of
 # the repo; the code reads env.R2_ACCOUNT_ID whether it's a var or a secret.
 #
-# TODAY the read credential is the SHARED platform R2 key (bucket-scoped, not read-only).
-# FOLLOW-ON: mint a dedicated Object-Read-ONLY R2 token and re-`secret put` these two.
+# READ CREDENTIAL — MUST BE ACCOUNT-SCOPED BEFORE THE FIRST PER-SITE BUCKET GOES LIVE.
+# TODAY the deployed key is the SHARED platform R2 key: BUCKET-scoped to
+# "doubleyoup-media" and not read-only. With that key the per-site (primary) lookup is
+# an auth denial for every slug, which the fallback absorbs — so the Worker keeps
+# serving, but NO migrated site can be read until the key is swapped. Required before
+# per-site buckets go live: mint an ACCOUNT-scoped, Object-Read-ONLY R2 token (it must
+# be able to read the shared bucket AND every "doubleyoup-media-<slug>" bucket) and
+# re-`secret put` R2_S3_KEY / R2_S3_SECRET.
 #
 # Deploy (needs wrangler auth to the doubleyoup Cloudflare account):
 #   1. wrangler kv namespace create HOSTMAP        # copy the id below (once per account)
@@ -24,8 +31,12 @@
 #      media.<customer> requests hit it.
 #
 # PREREQUISITES / gated (Jason — NOT done by the Phase-1 code change):
+#   • An ACCOUNT-scoped Object-Read-only R2 credential (see above) before the first
+#     per-site bucket goes live.
 #   • The per-site buckets "doubleyoup-media-<slug>" must exist and hold the migrated
-#     objects (write-side provisioning + migration of the existing sites).
+#     objects (write-side provisioning + migration of the existing sites) — but only
+#     PER SITE: an unmigrated site keeps serving from the shared bucket via the
+#     fallback, so migration does not have to be a big bang.
 #   • media.doubleyoup.com must be RE-ROUTED off its current direct-R2-custom-domain
 #     binding and ONTO this Worker (a zone change; per-slug flippable during migration).
 #     Until re-routed, the shared host keeps serving the single legacy bucket directly.
@@ -46,8 +57,12 @@ compatibility_date = "2026-01-01"
 
 [vars]
 SHARED_HOST = "media.doubleyoup.com"
-# MEDIA_BUCKET pins every slug to the single shared bucket (the platform's current
-# state). Remove it once per-site "doubleyoup-media-<slug>" buckets are the source.
+# MEDIA_BUCKET is the FALLBACK (shared, pre-per-site) bucket — NOT a pin. Every request
+# tries "doubleyoup-media-<slug>" first and only asks this bucket when the per-site one
+# answers 404/401/403 (not migrated yet, or the read key can't see it). Unset behaves
+# identically: the Worker defaults to "doubleyoup-media". Keep it until EVERY site's
+# media has been migrated into its own bucket; retiring the fallback then means deleting
+# the second attempt in src/index.js (bucketAttemptOrder), not just this var.
 MEDIA_BUCKET = "doubleyoup-media"
 
 [[kv_namespaces]]

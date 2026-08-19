@@ -4,10 +4,12 @@
   "private": true,
   "description": "doubleyoup media Worker — serves the doubleyoup-media R2 bucket for the shared media.doubleyoup.com/<slug>/... host and branded per-site custom hostnames (resolved via the HOSTMAP KV) attached through Cloudflare for SaaS.",
   "main": "src/index.js",
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.55.0"

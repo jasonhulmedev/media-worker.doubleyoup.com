@@ -1,8 +1,9 @@
 # media-worker.doubleyoup.com — agent working guide
 
 Cloudflare Worker serving each site's own `doubleyoup-media-<slug>` R2 bucket for
-the shared host and branded per-site hostnames. No static R2 binding — the bucket
-is derived from the resolved slug and read with a SigV4-signed S3 GET using one
+the shared host and branded per-site hostnames, with a fallback to the shared legacy
+bucket for sites not migrated yet. No static R2 binding — the bucket names are
+derived from the resolved slug and read with a SigV4-signed S3 GET using one
 account-scoped, Object-Read-ONLY R2 credential (Worker secrets). No DB, no queue,
 no other services called — read `README.md` first for bindings/deploy; this file
 is gotchas + conventions.
@@ -11,14 +12,17 @@ is gotchas + conventions.
 
 ```
 npm install
+npm test             # node --test (built-in runner, no framework) — src/index.js unit + handler tests
 npm run dev          # wrangler dev — local R2/KV emulation (--remote for real bucket/namespace)
 npm run deploy       # wrangler deploy
 npm run tail         # wrangler tail — live log from the deployed Worker
 ```
 
-No build step, no typecheck, no test suite. Verify changes with `wrangler dev`
-against a local or `--remote` bucket and curling shared-host and branded-host
-requests (see "Structure" below for how to fake a branded host locally).
+No build step, no typecheck. Verify changes with `npm test` + `node --check
+src/index.js`, then `wrangler dev` against a local or `--remote` bucket, curling
+shared-host and branded-host requests (see "Structure" below for how to fake a
+branded host locally). `npx wrangler deploy --dry-run --outdir=<tmp>` bundles
+without deploying.
 
 ## Structure — what matters
 
@@ -26,14 +30,39 @@ This is effectively a one-file Worker:
 
 - `src/index.js` — the entire Worker: method/path/host parsing, KV lookup for
   branded hosts, slug validation + `doubleyoup-media-<slug>` derivation, the
-  hand-rolled SigV4 signer + S3 GET/HEAD, response header assembly (content-type
-  fallback by extension, conditional/range forward-and-sign, CORS, cache-control).
-- `wrangler.toml` — the `HOSTMAP` KV binding + `SHARED_HOST`/`R2_ACCOUNT_ID` vars +
-  the `R2_S3_KEY`/`R2_S3_SECRET` read-credential secrets (set via `wrangler secret
-  put`, not in the toml) + deploy steps in the header comment. No R2 binding.
-- `package.json` — just the three wrangler scripts; no other dependencies.
+  primary→fallback bucket attempt order, the hand-rolled SigV4 signer + S3 GET/HEAD,
+  response header assembly (content-type fallback by extension, conditional/range
+  forward-and-sign, CORS, cache-control). It also has two named exports,
+  `bucketAttemptOrder` / `shouldFallbackToSharedBucket`, purely so the bucket
+  decision is unit-testable — Cloudflare ignores named exports that aren't
+  entrypoint classes, so adding more for testing is safe.
+- `wrangler.toml` — the `HOSTMAP` KV binding + `SHARED_HOST`/`MEDIA_BUCKET` vars +
+  the `R2_ACCOUNT_ID`/`R2_S3_KEY`/`R2_S3_SECRET` read-credential secrets (set via
+  `wrangler secret put`, not in the toml) + deploy steps in the header comment.
+  No R2 binding.
+- `test/` — `node:test` files run by `npm test`: `bucket-selection.test.js` (the two
+  pure functions) and `fallback-flow.test.js` (the real handler with `globalThis.fetch`
+  stubbed in place of the R2 S3 endpoint). No framework, no network, no credentials.
+- `package.json` — the wrangler scripts + `test`; `"type": "module"` so plain `node`
+  loads the ESM source. Only devDependency is wrangler.
 
 ## Conventions actually used here
+
+- **Two bucket attempts per request, primary always first.** `doubleyoup-media-<slug>`
+  is tried first; the shared bucket (`MEDIA_BUCKET`, default `doubleyoup-media`) is
+  tried ONLY if the primary returned 404/401/403. `MEDIA_BUCKET` is the FALLBACK name —
+  it used to pin every slug to the shared bucket, and code/docs written before that
+  change may still describe it that way. Never let it override the primary.
+- **Only 404/401/403 fall through, and only from the primary.** 5xx from the primary
+  must propagate (never mask a real outage with a second lookup that could 404), and
+  the fallback's response is passed to `buildClientResponse` untouched so a 401/403
+  there surfaces as a 500 rather than a 60s-cached 404.
+- **The fallback path logs; the happy paths don't.** Two `console.warn` lines exist
+  because a fallback 404 is otherwise indistinguishable from "object missing":
+  `fallback-auth-denied` (primary answered 401/403 — the alarm for a broken per-site
+  read credential being masked by the shared bucket) and `not-found-in-both-buckets`
+  (primary 404 + fallback 404). Keep both silent on primary-200 and on
+  primary-404 → fallback-200, which is every request from an unmigrated site.
 
 - **R2 key scheme is always `<slug>/<path>`, never anything else.** Shared-host
   requests already have the slug as the path's first segment (key = raw path);
@@ -60,6 +89,11 @@ This is effectively a one-file Worker:
 
 ## Gotchas
 
+- **The deployed read credential is BUCKET-scoped to the shared bucket today**, so every
+  per-site (primary) lookup in prod is currently an auth denial absorbed by the fallback.
+  That is fine while nothing is migrated, but a site migrated into its own bucket will
+  404 until an ACCOUNT-scoped Object-Read-only R2 token is `wrangler secret put` over
+  `R2_S3_KEY`/`R2_S3_SECRET`. Check this first when a migrated site serves 404/500.
 - **This is a Cloudflare Worker, not a Node service.** No `server.mjs`/Express,
   no constellation container, no `infra/constellation` entry, no BullMQ, no
   outbound HTTP to `app`/`orchestrator`. Don't try to run this like the other
@@ -79,8 +113,9 @@ This is effectively a one-file Worker:
   The code targets the end state where it is (deriving the bucket from the path's
   first segment), but re-pointing `media.doubleyoup.com` off its current
   direct-R2-custom-domain binding onto this Worker is a **gated deploy step**
-  (Jason) that also requires the per-site `doubleyoup-media-<slug>` buckets to
-  exist + be migrated first. Until that flip, only branded `media.<customer>`
+  (Jason). It no longer requires the per-site buckets to exist first — the
+  shared-bucket fallback serves unmigrated slugs — but it does require the
+  account-scoped read credential. Until that flip, only branded `media.<customer>`
   hostnames route here and the shared host serves the single legacy bucket
   directly. Do not assume the shared host hits this Worker in prod today.
 - **`SHARED_HOST` is compared case-insensitively** (`url.hostname.toLowerCase()`

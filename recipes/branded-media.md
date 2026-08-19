@@ -7,17 +7,19 @@ Worker, on doubleyoup's **shared** `doubleyoup.com` Cloudflare zone. Worked exam
 ## Current state (bucket model)
 
 The platform still runs the ONE shared bucket `doubleyoup-media` with keys
-`<slug>/<path>` — NOT the per-site `doubleyoup-media-<slug>` buckets the H1 code
-targets. So the Worker is pinned to the shared bucket with the `MEDIA_BUCKET` var
-(`wrangler.toml [vars] MEDIA_BUCKET = "doubleyoup-media"`). Remove that var once
-per-site buckets exist and are migrated; the Worker then derives
-`doubleyoup-media-<slug>` per request. The `<slug>/<path>` key scheme is identical
-either way.
+`<slug>/<path>` — the per-site `doubleyoup-media-<slug>` buckets the H1 code targets
+do not exist yet for these sites. The Worker no longer *pins* to the shared bucket:
+it tries `doubleyoup-media-<slug>` first and falls back to the shared bucket
+(`wrangler.toml [vars] MEDIA_BUCKET = "doubleyoup-media"`) on a 404/401/403, so a
+site can be migrated on its own without a Worker deploy. Keep that var until EVERY
+site is migrated. The `<slug>/<path>` key scheme is identical in both buckets.
 
-Read credential = the **shared platform R2 key** (bucket-scoped, NOT read-only),
-held as Worker secrets `R2_S3_KEY` / `R2_S3_SECRET` (+ `R2_ACCOUNT_ID`).
-FOLLOW-ON: mint a dedicated Object-Read-ONLY R2 token and `wrangler secret put`
-these two.
+Read credential = the **shared platform R2 key** (bucket-scoped to
+`doubleyoup-media`, NOT read-only), held as Worker secrets `R2_S3_KEY` /
+`R2_S3_SECRET` (+ `R2_ACCOUNT_ID`). Because it is bucket-scoped, every per-site probe
+is denied and the fallback answers — correct today, but **a migrated site cannot be
+read until an ACCOUNT-scoped, Object-Read-ONLY R2 token replaces it** (`wrangler
+secret put` both values). Do that before migrating any site's media.
 
 ## Why a SPECIFIC route, never `*/*`
 
@@ -185,8 +187,9 @@ it was run.
 
 ## Follow-ons
 
-- Mint an Object-Read-ONLY R2 token; re-`secret put` `R2_S3_KEY`/`R2_S3_SECRET`
-  (today the Worker holds the shared platform R2 key).
+- Mint an ACCOUNT-scoped, Object-Read-ONLY R2 token; re-`secret put`
+  `R2_S3_KEY`/`R2_S3_SECRET` (today the Worker holds the shared platform R2 key,
+  bucket-scoped). **Blocks per-site bucket migration** — see "Current state" above.
 - Fold KV-entry + custom-hostname + route creation + the post-flip php-fpm reload
   into the orchestrator's domain automation so branded media onboards (and flips)
   with the site's other custom domains. (`Workers Routes:Edit` is now on the token.)
