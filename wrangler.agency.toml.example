@@ -1,0 +1,37 @@
+# AN AGENCY'S OWN COPY of the doubleyoup media Worker (hub#43). Copy this file to wrangler.toml in the agency's
+# fork, fill in the three <...> values, then follow the runbook in README.md ("Agency copy").
+#
+# What it does: serves ONE agency media host for every site on the agency's cell. The path is
+# /<slug>/<key>; the Worker reads the bucket "doubleyoup-media-<slug>" in the AGENCY's own R2 account with
+# a SigV4 GET and an Object-Read-ONLY key. It has no write path and no shared fallback bucket.
+#
+# Secrets (set with `wrangler secret put`, never committed, never printed):
+#   R2_ACCOUNT_ID   the AGENCY's Cloudflare account id (the R2 S3 endpoint host)
+#   R2_S3_KEY       an R2 S3 access key id with Object READ ONLY on the agency's media buckets
+#   R2_S3_SECRET    its secret access key
+#
+# The platform never holds these. The agency creates the read-only key in its own dashboard.
+
+name = "doubleyoup-media"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Custom domain on the agency's zone. A Worker custom domain makes Cloudflare create the DNS record and the
+# certificate. The host must be ONE label under the zone (for example media.<agency zone>) so the Universal
+# SSL certificate covers it. [unverified] that `custom_domain = true` is accepted on the agency's plan: check
+# with `wrangler deploy --dry-run` before relying on it.
+routes = [
+  { pattern = "<media.agency-zone.example>", custom_domain = true },
+]
+
+[vars]
+SHARED_HOST = "<media.agency-zone.example>"
+# "none" turns the shared legacy bucket fallback off: the agency has no such bucket.
+MEDIA_BUCKET = "none"
+
+# Only needed for branded per-site customer hosts. The agency copy serves the one agency host, so the KV
+# namespace can stay empty. Create it with `wrangler kv namespace create HOSTMAP` and paste the id.
+# [unverified] whether wrangler 4 creates the namespace by itself on deploy when `id` is left out.
+[[kv_namespaces]]
+binding = "HOSTMAP"
+id = "<agency HOSTMAP kv namespace id>"

@@ -143,6 +143,25 @@ The orchestrator does this automatically as part of site onboarding
 (`orchestrator.doubleyoup.com`'s domain automation); the command above is for
 manual/one-off use.
 
+## Agency copy (hub#43)
+
+An agency runs its OWN copy of this Worker in its own Cloudflare account, so its media is served from its own
+buckets and the platform holds no key to them. Use `wrangler.agency.toml.example` as the starting point.
+
+1. Fork or copy this repo into the agency's account. Copy `wrangler.agency.toml.example` to `wrangler.toml`.
+2. Set `SHARED_HOST` and the route pattern to one host on the agency zone, for example `media.<agency zone>`.
+   Keep it to one label under the zone so the Universal SSL certificate covers it.
+3. Keep `MEDIA_BUCKET = "none"`. It turns the shared fallback bucket off (the agency has no such bucket).
+4. In the agency's R2 dashboard create an Object-Read-ONLY key for the media buckets. Set the three secrets with
+   `wrangler secret put R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET`.
+5. `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
+6. Move a site with `npm run media-relocate` in the orchestrator (dry run first). It copies the objects into the
+   agency bucket `doubleyoup-media-<slug>`, switches the site's constants to this host, and verifies.
+
+The path is `/<slug>/<key>`, the same as the shared host, so the site's `DOUBLEYOUP_R2_PREFIX` stays the slug.
+The existing per-site custom domains (`<slug>-media.<agency zone>`) bind a bucket directly and do not use this
+Worker. They can stay as a fallback or be unbound. That is a decision for the operator.
+
 ## Debugging in prod
 
 ```

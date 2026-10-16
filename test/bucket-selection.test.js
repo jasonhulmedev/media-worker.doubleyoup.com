@@ -45,3 +45,14 @@ test("only 401/403/404 from the primary trigger the shared-bucket fallback", () 
     assert.equal(shouldFallbackToSharedBucket(status), false, `expected no fallback on ${status}`);
   }
 });
+
+// hub#43: the agency copy of the Worker has no shared legacy bucket.
+test('MEDIA_BUCKET="none" or "off" (any case) leaves only the per-site bucket', () => {
+  for (const value of ["none", "NONE", " off ", "Off"]) {
+    assert.deepEqual(bucketAttemptOrder(SLUG, { MEDIA_BUCKET: value }), ["doubleyoup-media-rareepicgamer-19f933"], value);
+  }
+});
+
+test("a bucket whose name merely starts with none is still a fallback bucket", () => {
+  assert.deepEqual(bucketAttemptOrder(SLUG, { MEDIA_BUCKET: "none-shared" }), ["doubleyoup-media-rareepicgamer-19f933", "none-shared"]);
+});

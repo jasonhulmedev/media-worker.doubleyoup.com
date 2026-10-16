@@ -87,6 +87,14 @@ const FALLBACK_TRIGGER_STATUSES = new Set([401, 403, 404]);
 // a Workers runtime — Cloudflare ignores named exports other than the default handler.
 export function bucketAttemptOrder(slug, env) {
   const perSiteBucket = `doubleyoup-media-${slug}`;
+
+  // hub#43: an AGENCY's own copy of this Worker has no shared legacy bucket. MEDIA_BUCKET="none" (or
+  // "off") turns the fallback off, so a miss is a plain 404 and the Worker never asks for a bucket the
+  // agency does not own. Without this the default name "doubleyoup-media" would be tried in the agency's
+  // account on every miss.
+  const configuredFallback = String(env.MEDIA_BUCKET || "").trim().toLowerCase();
+  if (configuredFallback === "none" || configuredFallback === "off") return [perSiteBucket];
+
   const sharedBucket = env.MEDIA_BUCKET || DEFAULT_SHARED_BUCKET;
 
   // Only possible with a deliberately odd MEDIA_BUCKET, but never pay for the same
