@@ -160,7 +160,13 @@ buckets and the platform holds no key to them. Use `wrangler.agency.toml.example
 
 The path is `/<slug>/<key>`, the same as the shared host, so the site's `DOUBLEYOUP_R2_PREFIX` stays the slug.
 The existing per-site custom domains (`<slug>-media.<agency zone>`) bind a bucket directly and do not use this
-Worker. They can stay as a fallback or be unbound. That is a decision for the operator.
+Worker. Keep them serving until their site is switched to this host. After the switch is verified, unbind the
+site's custom domain in the agency's R2 dashboard (a documented step, never automatic).
+
+One media host per agency: `media.<agency zone>`. `npm run media-relocate` in the orchestrator refuses any other
+host for an agency cell. A NEW site on an agency cell is provisioned on this host and on the agency's bucket from
+the start (orchestrator and app flag `AGENCY_MEDIA_ENABLED=1`, default off). Turn that flag on only after this
+Worker is deployed and serving the host.
 
 ## Debugging in prod
 
