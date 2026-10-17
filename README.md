@@ -152,7 +152,7 @@ buckets and the platform holds no key to them. Use `wrangler.agency.toml.example
 2. Set `SHARED_HOST` and the route pattern to one host on the agency zone, for example `media.<agency zone>`.
    Keep it to one label under the zone so the Universal SSL certificate covers it.
 3. Keep `MEDIA_BUCKET = "none"`. It turns the shared fallback bucket off (the agency has no such bucket).
-4. In the agency's R2 dashboard create an Object-Read-ONLY key for the media buckets. Set the three secrets with
+4. In the agency's R2 dashboard create an Object-Read-ONLY key that is ACCOUNT-WIDE (Object Read on ALL buckets of the account), not a list of buckets. A new site's bucket `doubleyoup-media-<slug>` is then covered without a change to the key. A key that names buckets makes the Worker answer 500 for every object of a new site (an R2 403 becomes an internal error here). The orchestrator checks this after it provisions a new site: it asks for an object that cannot exist and only a 404 passes (hub#43 M7). Set the three secrets with
    `wrangler secret put R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET`.
 5. `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
 6. Move a site with `npm run media-relocate` in the orchestrator (dry run first). It copies the objects into the

@@ -10,7 +10,9 @@
 #   R2_S3_KEY       an R2 S3 access key id with Object READ ONLY on the agency's media buckets
 #   R2_S3_SECRET    its secret access key
 #
-# The platform never holds these. The agency creates the read-only key in its own dashboard.
+# These stay in the agency's account: the agency creates the read-only key in its own dashboard and the platform
+# is never given it. The read key must be ACCOUNT-WIDE (Object Read on all buckets), so a new site's bucket is
+# covered without a change to the key (hub#43 M7).
 
 name = "doubleyoup-media"
 main = "src/index.js"
