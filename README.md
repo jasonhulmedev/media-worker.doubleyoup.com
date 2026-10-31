@@ -1,8 +1,8 @@
 # media-worker.doubleyoup.com
 
 Cloudflare Worker that serves each site's **own** R2 bucket
-(`doubleyoup-media-<slug>`) as public, cacheable media — the sole read path for
-every site's offloaded media on the doubleyoup platform (H1 per-site isolation) —
+(`doubleyoup-media-<slug>`) as public, cacheable media — the read path for media
+in the platform R2 account (H1 per-site isolation). An agency cell serves its media from its own copy of this Worker (see Agency copy) —
 falling back to the shared legacy bucket for sites not migrated yet (see
 [Bucket resolution](#bucket-resolution-per-site-first-shared-bucket-fallback)).
 There is no static R2 binding: the bucket names are derived from the resolved slug
@@ -75,15 +75,12 @@ second attempt in `src/index.js` (`bucketAttemptOrder`), not just unsetting the 
 | `SHARED_HOST`                | var            | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
 | `MEDIA_BUCKET`               | var            | the **fallback** (shared/legacy) bucket name; defaults to `doubleyoup-media` when unset |
 
-### The read credential must become ACCOUNT-scoped before per-site buckets go live
+### The read credential is account-scoped
 
-The deployed `R2_S3_KEY`/`R2_S3_SECRET` today is the shared platform R2 key —
-**bucket-scoped to `doubleyoup-media`** (and not read-only). With that key, every
-primary (per-site) lookup is an auth denial that the fallback absorbs, so the Worker
-keeps serving correctly, but **no migrated site can be read**. Before the first
-per-site bucket goes live, mint an **account-scoped, Object-Read-only** R2 token
-(readable across the shared bucket and every `doubleyoup-media-<slug>` bucket) and
-`wrangler secret put` both values again.
+The deployed `R2_S3_KEY`/`R2_S3_SECRET` is an account-scoped, Object-Read-only R2 key
+(set 2026-08-20). It reads the shared bucket and every `doubleyoup-media-<slug>` bucket.
+Do not replace it with a bucket-scoped key. Every per-site read then fails, and the
+fallback hides the failure.
 
 ## Local dev
 
@@ -122,14 +119,9 @@ endpoint stubbed at `globalThis.fetch` — no Workers runtime, no credentials.
    Hostnames) on the zone and set its fallback origin / Worker route so that
    branded `media.<customer>` hostnames route to this Worker.
 
-**Gated prerequisites (Jason) before the shared host is served here:** this Worker
-targets the end state where it serves `media.doubleyoup.com` too, but that requires
-re-routing `media.doubleyoup.com` off its current direct-R2-custom-domain binding
-onto this Worker (a zone change, per-slug flippable during migration). Until then
-the shared host keeps serving the single legacy bucket directly and only branded
-hostnames route here. The per-site buckets are **no longer** a prerequisite for that
-re-route — an unmigrated slug is served from the shared bucket by the fallback — but
-the account-scoped read credential above is.
+The shared host `media.doubleyoup.com` routes through this Worker since 2026-08-27.
+The cell sites' objects are only in their per-site buckets, so the direct-R2 binding
+cannot serve them.
 
 ### Onboarding a branded host
 
@@ -165,7 +157,7 @@ site's custom domain in the agency's R2 dashboard (a documented step, never auto
 
 One media host per agency: `media.<agency zone>`. `npm run media-relocate` in the orchestrator refuses any other
 host for an agency cell. A NEW site on an agency cell is provisioned on this host and on the agency's bucket from
-the start (orchestrator and app flag `AGENCY_MEDIA_ENABLED=1`, default off). Turn that flag on only after this
+the start (orchestrator and app flag `AGENCY_MEDIA_ENABLED=1`, off by default in code). Prod runs it on since 2026-10-23. A cell qualifies only when it has a cfZone and its `media.<cfZone>` host is not the platform media host. Set the flag the same way on app and orchestrator. Turn that flag on only after this
 Worker is deployed and serving the host.
 
 ## Debugging in prod
@@ -180,7 +172,7 @@ they are the triage signal:
 
 | Line | Meaning |
 | ---- | ------- |
-| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential can't see the per-site bucket. Expected for every request while the deployed key is still bucket-scoped; **after** the account-scoped key is live, a persistent stream of these means a migrated site's read is broken (missing/unscoped/revoked key) and is being silently masked by the shared bucket. |
+| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential can't see the per-site bucket. The deployed key is account-scoped. A steady stream of these lines means a migrated site's read is broken (missing, unscoped or revoked key). The shared bucket hides that failure. |
 | `[media-worker] not-found-in-both-buckets slug=… key=… primary_bucket=… fallback_bucket=…` | the object exists in neither bucket — a genuine 404, not an auth problem. |
 
 If a *migrated* site 404s or 500s, check the read credential first: a bucket-scoped

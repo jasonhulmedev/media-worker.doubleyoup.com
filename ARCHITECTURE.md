@@ -70,8 +70,7 @@
    conditional/range semantics itself. There is **no static R2 binding**.
 
    If the primary answers **404** (bucket/object not migrated yet) or **401/403** (the
-   read credential can't see that bucket — the state while the key is still
-   bucket-scoped), the identical signed request is replayed against the **shared
+   read credential cannot see that bucket), the identical signed request is replayed against the **shared
    fallback bucket** (`MEDIA_BUCKET`, default `doubleyoup-media`); the two buckets use
    the same `<slug>/<path>` key, so sites can be migrated one at a time with no Worker
    deploy. Every other primary status — including 5xx — is returned as-is so a real
@@ -102,7 +101,7 @@ Every path is wrapped in a top-level try/catch that returns a bare 500 —
 
 | Binding          | Type          | Source of truth                                                    |
 | ---------------- | ------------- | -------------------------------------------------------------------- |
-| `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one **account-scoped, Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of the shared bucket AND every per-site `doubleyoup-media-<slug>` bucket. Never held in a tenant container (that's the per-site *write* credential, which is bucket-scoped). Set via `wrangler secret put`. **Must be account-scoped before the first per-site bucket goes live** — the currently deployed key is bucket-scoped to the shared bucket, which the fallback tolerates but a migrated site does not. |
+| `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one **account-scoped, Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of the shared bucket AND every per-site `doubleyoup-media-<slug>` bucket. Never held in a tenant container (that's the per-site *write* credential, which is bucket-scoped). Set via `wrangler secret put`. The deployed key is account-scoped (2026-08-20). A bucket-scoped key would make every per-site read fail. |
 | `R2_ACCOUNT_ID`  | plaintext var | the Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` (not secret) |
 | `HOSTMAP`        | KV namespace  | `hostname -> slug`; written by `orchestrator.doubleyoup.com`'s domain automation when a branded media host is onboarded (or manually via `wrangler kv key put`) |
 | `SHARED_HOST`    | plaintext var | the one host treated as "path already has the slug" (`media.doubleyoup.com`) |
@@ -128,14 +127,9 @@ This Worker is the read side of a write path owned entirely elsewhere:
   `HOSTMAP` KV entry as part of site/domain setup. This Worker never talks to
   `orchestrator` or `app` at request time — `HOSTMAP` is the only coupling,
   and it's asynchronous (KV write happens once, ahead of any request).
-- **Shared host (target state)**: this Worker is built to serve
-  `media.doubleyoup.com` too (deriving the bucket from the path's first segment).
-  Routing the shared host onto this Worker is a **gated deploy step** (Jason): it
-  requires re-pointing `media.doubleyoup.com` off its current direct-R2-custom-
-  domain binding, plus the account-scoped read credential. The per-site buckets no
-  longer have to exist first — the fallback serves unmigrated slugs from the shared
-  bucket. Until then the shared host keeps serving the single legacy bucket directly
-  and only branded per-customer hostnames route here.
+- **Shared host**: this Worker serves `media.doubleyoup.com` through a Worker route
+  (2026-08-27). The bucket comes from the path's first segment. Unmigrated slugs, such
+  as local-Docker sites, fall back to the shared bucket.
 
 ## Statelessness
 
