@@ -4,6 +4,8 @@
 # What it does: serves ONE agency media host for every site on the agency's cell. The path is
 # /<slug>/<key>; the Worker reads the bucket "doubleyoup-media-<slug>" in the AGENCY's own R2 account with
 # a SigV4 GET and an Object-Read-ONLY key. It has no write path and no shared fallback bucket.
+# trash/<date>/<key> (hub#222 soft delete) is refused with the plain 404 before any R2 read, so a
+# deleted file is never public.
 #
 # Secrets (set with `wrangler secret put`, never committed, never printed):
 #   R2_ACCOUNT_ID   the AGENCY's Cloudflare account id (the R2 S3 endpoint host)
