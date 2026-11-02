@@ -30,6 +30,16 @@ hits, a short one on 404s (so a bad/unknown path or host doesn't hammer
 KV/R2 on every repeat request), and every response — including errors —
 carries permissive read CORS since this only ever serves public assets.
 
+## Soft delete (hub#222)
+
+Deleted media moves to `trash/<date>/<key>` instead of being hard-deleted, and a
+deleted file must not stay public. The Worker refuses any request whose resolved
+R2 key or site path starts with `trash/` — `/<slug>/trash/...` and `/trash/...`
+on the shared host, `/trash/...` on a branded host — with the same plain 404 and
+short negative cache as any missing object. The refusal happens before the first
+R2 read: a trash request never reaches the bucket, so it cannot be served from
+either the per-site or the shared bucket and costs no upstream request.
+
 ## Bucket resolution (per-site first, shared-bucket fallback)
 
 Sites are migrated into their own bucket **one at a time**, so every request may try

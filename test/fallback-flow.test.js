@@ -237,3 +237,69 @@ test("branded hosts get the same fallback, with the slug from HOSTMAP", async ()
   // Branded requests carry no slug in the path, so the Worker prepends it to the key.
   assert.ok(upstreamCalls[1].url.endsWith(`/${SHARED_BUCKET}/${SLUG}/${OBJECT_PATH}`));
 });
+
+// hub#222 soft delete: a request that resolves into trash/ is refused with the plain
+// 404 (60s negative cache) BEFORE the first R2 read, on the shared host and on
+// branded hosts. stubUpstream([]) queues no canned response, so any upstream call
+// the Worker made would fail the test on the queue assertion.
+test("trash under the site path on the shared host is a 404 with no R2 call", async () => {
+  stubUpstream([]);
+  const request = new Request(`https://media.doubleyoup.com/${SLUG}/trash/2026-11-02/${OBJECT_PATH}`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(await response.text(), "Not found");
+  assert.equal(upstreamCalls.length, 0, "trash must be refused before any R2 read");
+  assert.deepEqual(warnings, [], "the refusal is the expected path, not an alarm");
+});
+
+test("a root trash key on the shared host (trash in the slug position) is a 404 with no R2 call", async () => {
+  stubUpstream([]);
+  const request = new Request(`https://media.doubleyoup.com/trash/2026-11-02/${SLUG}/${OBJECT_PATH}`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+  assert.equal(upstreamCalls.length, 0, "trash must be refused before any R2 read");
+});
+
+test("trash on a branded host is a 404 with no R2 call", async () => {
+  stubUpstream([]);
+  const brandedEnv = { ...ENV, HOSTMAP: { get: async () => SLUG } };
+  const request = new Request(`https://media.rareepicgamer.zone/trash/2026-11-02/${OBJECT_PATH}`);
+
+  const response = await worker.fetch(request, brandedEnv);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+  assert.equal(upstreamCalls.length, 0, "trash must be refused before any R2 read");
+});
+
+test("HEAD on a trash key is a 404 with no body and no R2 call", async () => {
+  stubUpstream([]);
+  const request = new Request(`https://media.doubleyoup.com/${SLUG}/trash/2026-11-02/${OBJECT_PATH}`, {
+    method: "HEAD",
+  });
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), "");
+  assert.equal(upstreamCalls.length, 0, "trash must be refused before any R2 read");
+});
+
+test("a path that merely contains trash later on still reaches R2", async () => {
+  stubUpstream([objectResponse(200)]);
+
+  const response = await worker.fetch(
+    new Request(`https://media.doubleyoup.com/${SLUG}/2025/08/trash-can.jpg`),
+    ENV,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamCalls.length, 1);
+});

@@ -3,6 +3,11 @@
 // (media.<theirdomain>/… via Cloudflare for SaaS). One R2 object per file; the
 // public URL differs, the R2 key does not.
 //
+// Soft delete (hub#222): deleted media moves to trash/<date>/<key>, so any
+// request whose resolved key or site path starts with "trash/" is refused with
+// the plain 404 (short negative cache) BEFORE the first R2 read — a deleted
+// file must not stay public. Same refusal on the shared host and branded hosts.
+//
 // Slug + key resolution (UNCHANGED from the single-bucket era):
 //   • shared host (SHARED_HOST): the slug is the first path segment — key = path.
 //   • branded host: look the Host up in KV (HOSTMAP: hostname -> slug) and prepend
@@ -109,6 +114,19 @@ export function bucketAttemptOrder(slug, env) {
 // 500 (broken credential) instead of quietly becoming a cached 404.
 export function shouldFallbackToSharedBucket(primaryStatus) {
   return FALLBACK_TRIGGER_STATUSES.has(primaryStatus);
+}
+
+// hub#222 soft delete: a deleted object is moved to trash/<date>/<key> and must
+// not stay public, so any request that resolves to a trash/ key is refused with
+// the plain 404 (short negative cache) before the first R2 read. Two shapes:
+//   • key starts with "trash/" — a root-level trash key, reachable on the shared
+//     host where "trash" sits in the slug position (/trash/<date>/<slug>/<file>);
+//   • sitePath starts with "trash/" — trash inside the site's own namespace:
+//     /trash/... on a branded host, /<slug>/trash/... on the shared one.
+// Exported (like the bucket helpers above) purely so it is unit-testable;
+// Cloudflare ignores named exports other than the default handler.
+export function isTrashRequest(key, sitePath) {
+  return key.startsWith("trash/") || sitePath.startsWith("trash/");
 }
 
 // The R2 S3 endpoint uses SigV4 with region "auto" and service "s3" (path-style),
@@ -423,6 +441,15 @@ export default {
       }
       if (!key) return notFound(method);
       if (!SLUG_PATTERN.test(slug)) return notFound(method);
+
+      // hub#222 soft delete: deleted media is moved to trash/<date>/<key> and must
+      // not stay public. Refuse before the first R2 read, on every host shape: the
+      // resolved key covers a root-level trash/ key (shared-host path
+      // /trash/<date>/<slug>/<file>, where "trash" sits in the slug position), the
+      // site path covers trash/ inside the site's namespace (/trash/... on a
+      // branded host, /<slug>/trash/... on the shared one).
+      const sitePath = key.slice(slug.length + 1); // key is always "<slug>/<path>"
+      if (isTrashRequest(key, sitePath)) return notFound(method);
 
       // Read credential is an Object-Read-ONLY R2 token held as a Worker secret (never
       // in a tenant container). Absent config => not live yet.
