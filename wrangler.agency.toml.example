@@ -33,9 +33,10 @@ SHARED_HOST = "<media.agency-zone.example>"
 # "none" turns the shared legacy bucket fallback off: the agency has no such bucket.
 MEDIA_BUCKET = "none"
 
-# Only needed for branded per-site customer hosts. The agency copy serves the one agency host, so the KV
-# namespace can stay empty. Create it with `wrangler kv namespace create HOSTMAP` and paste the id.
-# [unverified] whether wrangler 4 creates the namespace by itself on deploy when `id` is left out.
+# REQUIRED for branded per-site customer hosts (hub#133): every non-shared host is resolved to a slug
+# through this binding before any bucket is read. Create it with `wrangler kv namespace create HOSTMAP`
+# and paste the id. [unverified] whether wrangler 4 creates the namespace by itself on deploy when `id`
+# is left out.
 [[kv_namespaces]]
 binding = "HOSTMAP"
 id = "<agency HOSTMAP kv namespace id>"
