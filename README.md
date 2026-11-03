@@ -169,9 +169,60 @@ buckets and the platform holds no key to them. Use `wrangler.agency.toml.example
    agency bucket `doubleyoup-media-<slug>`, switches the site's constants to this host, and verifies.
 
 The path is `/<slug>/<key>`, the same as the shared host, so the site's `DOUBLEYOUP_R2_PREFIX` stays the slug.
-The existing per-site custom domains (`<slug>-media.<agency zone>`) bind a bucket directly and do not use this
-Worker. Keep them serving until their site is switched to this host. After the switch is verified, unbind the
-site's custom domain in the agency's R2 dashboard (a documented step, never automatic).
+
+### HOSTMAP is required on an agency copy (hub#133)
+
+The `HOSTMAP` KV namespace is **required** on an agency copy: any non-shared host
+is resolved to a slug through `env.HOSTMAP` before a bucket is read, and the
+agency copy exists to serve branded hosts. There is no branded-host read path
+without it. Title the namespace `HOSTMAP`, or set its id as `MEDIA_HOSTMAP_KV_ID`
+on the agency-orchestrator Worker.
+
+- The platform writes `<branded media host>` → R2 prefix entries into it through
+  the agency Worker.
+- Per-customer branded hosts (`media.<customer domain>`) reach this Worker
+  through a per-hostname Workers route (`media.<customer domain>/*`) in the
+  agency zone — never a `*/*` route (see "Why a SPECIFIC route, never `*/*`" in
+  recipes/branded-media.md). The route's script name comes from
+  `MEDIA_WORKER_SCRIPT` (default `doubleyoup-media`) on the agency-orchestrator
+  Worker.
+- **No per-site direct R2 custom-domain binding** (`<slug>-media.<agency zone>`,
+  Jason's decision 3, 2026-11-03): a binding that points straight at a bucket
+  bypasses this Worker, so it never gets the `trash/` refusal (hub#222) and
+  serves a deleted file for up to its cache TTL. The Workers-route path above
+  replaces it; unbind any existing `<slug>-media.<agency zone>` custom domains
+  from the R2 dashboard once their site is verified on this Worker (a documented
+  step, never automatic).
+
+This needs three more scopes on the agency's existing `CF_DNS_API_TOKEN` (widen
+the one token; do not create a second one):
+
+| Scope                              | Why                                                 |
+| ---------------------------------- | --------------------------------------------------- |
+| Zone → SSL and Certificates: Edit  | the Cloudflare-for-SaaS custom-hostname certificate |
+| Zone → Workers Routes: Edit        | the per-hostname Workers routes                     |
+| Account → Workers KV Storage: Edit | the HOSTMAP entries                                 |
+
+### Per-agency enablement runbook
+
+One-time setup per agency; every value below is a placeholder:
+
+1. **Widen the token.** Add the three scopes above to the agency's
+   `CF_DNS_API_TOKEN` (SSL and Certificates / Workers Routes / Workers KV
+   Storage).
+2. **Confirm Cloudflare for SaaS.** On the agency zone, Custom Hostnames is on
+   with fallback origin `host.<agency zone>`.
+3. **Create + bind HOSTMAP.**
+   ```
+   wrangler kv namespace create HOSTMAP
+   ```
+   Paste the id into the `[[kv_namespaces]]` block of the agency `wrangler.toml`
+   and redeploy the agency media Worker.
+4. **Point the orchestrator at it.** Set `MEDIA_WORKER_SCRIPT` (default
+   `doubleyoup-media`) and `MEDIA_HOSTMAP_KV_ID` (the new namespace id) on the
+   agency-orchestrator Worker.
+5. **Re-run the onboarding self-check** on the agency-orchestrator Worker; it
+   must come back green before any branded host is routed.
 
 One media host per agency: `media.<agency zone>`. `npm run media-relocate` in the orchestrator refuses any other
 host for an agency cell. A NEW site on an agency cell is provisioned on this host and on the agency's bucket from
