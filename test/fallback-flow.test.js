@@ -303,3 +303,68 @@ test("a path that merely contains trash later on still reaches R2", async () => 
   assert.equal(response.status, 200);
   assert.equal(upstreamCalls.length, 1);
 });
+
+// orchestrator#84: a staging site writes to "sg-<slug>/..." in the SAME bucket as live.
+// The bucket comes from the captured site slug; the key stays the full path.
+const keyOfCall = (call) => new URL(call.url).pathname.split("/").slice(2).join("/");
+
+test("sg-<slug> on the shared host reads the site's bucket with the full sg- key", async () => {
+  stubUpstream([objectResponse(200)]);
+  const request = new Request(`https://media.doubleyoup.com/sg-acme/2026/11/x.png`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamCalls.length, 1);
+  assert.equal(bucketOf(upstreamCalls[0]), "doubleyoup-media-acme");
+  assert.equal(keyOfCall(upstreamCalls[0]), "sg-acme/2026/11/x.png");
+});
+
+test("sg-<slug> falls back to the shared bucket with the same sg- key", async () => {
+  stubUpstream([s3ErrorResponse(404, "NoSuchBucket"), objectResponse(200)]);
+  const request = new Request(`https://media.doubleyoup.com/sg-acme/2026/11/x.png`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(bucketOf(upstreamCalls[0]), "doubleyoup-media-acme");
+  assert.equal(bucketOf(upstreamCalls[1]), SHARED_BUCKET);
+  assert.equal(keyOfCall(upstreamCalls[1]), "sg-acme/2026/11/x.png");
+});
+
+test("a bare sg- segment is a 404 with no R2 call", async () => {
+  stubUpstream([]);
+
+  const response = await worker.fetch(new Request("https://media.doubleyoup.com/sg-/x"), ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(upstreamCalls.length, 0);
+});
+
+test("sg- plus a 46-char slug (49 chars) is accepted, one more char is refused", async () => {
+  const longSlug = "a".repeat(46);
+  stubUpstream([objectResponse(200)]);
+
+  const accepted = await worker.fetch(new Request(`https://media.doubleyoup.com/sg-${longSlug}/x.png`), ENV);
+
+  assert.equal(accepted.status, 200);
+  assert.equal(bucketOf(upstreamCalls[0]), `doubleyoup-media-${longSlug}`);
+  assert.equal(keyOfCall(upstreamCalls[0]), `sg-${longSlug}/x.png`);
+
+  upstreamCalls = [];
+  stubUpstream([]);
+  const refused = await worker.fetch(new Request(`https://media.doubleyoup.com/sg-${longSlug}a/x.png`), ENV);
+
+  assert.equal(refused.status, 404);
+  assert.equal(upstreamCalls.length, 0);
+});
+
+test("trash under an sg- prefix is a 404 with no R2 call", async () => {
+  stubUpstream([]);
+  const request = new Request(`https://media.doubleyoup.com/sg-acme/trash/2026-11-02/x.png`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(upstreamCalls.length, 0);
+});
