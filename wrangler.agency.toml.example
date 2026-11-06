@@ -4,6 +4,8 @@
 # What it does: serves ONE agency media host for every site on the agency's cell. The path is
 # /<slug>/<key>; the Worker reads the bucket "doubleyoup-media-<slug>" in the AGENCY's own R2 account with
 # a SigV4 GET and an Object-Read-ONLY key. It has no write path and no shared fallback bucket.
+# trash/<date>/<key> (hub#222 soft delete) is refused with the plain 404 before any R2 read, so a
+# deleted file is never public.
 #
 # Secrets (set with `wrangler secret put`, never committed, never printed):
 #   R2_ACCOUNT_ID   the AGENCY's Cloudflare account id (the R2 S3 endpoint host)
@@ -31,9 +33,10 @@ SHARED_HOST = "<media.agency-zone.example>"
 # "none" turns the shared legacy bucket fallback off: the agency has no such bucket.
 MEDIA_BUCKET = "none"
 
-# Only needed for branded per-site customer hosts. The agency copy serves the one agency host, so the KV
-# namespace can stay empty. Create it with `wrangler kv namespace create HOSTMAP` and paste the id.
-# [unverified] whether wrangler 4 creates the namespace by itself on deploy when `id` is left out.
+# REQUIRED for branded per-site customer hosts (hub#133): every non-shared host is resolved to a slug
+# through this binding before any bucket is read. Create it with `wrangler kv namespace create HOSTMAP`
+# and paste the id. [unverified] whether wrangler 4 creates the namespace by itself on deploy when `id`
+# is left out.
 [[kv_namespaces]]
 binding = "HOSTMAP"
 id = "<agency HOSTMAP kv namespace id>"
