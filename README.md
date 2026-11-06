@@ -2,9 +2,10 @@
 
 Cloudflare Worker serving each site's own `doubleyoup-media-<slug>` R2 bucket
 for the shared host and branded per-site hostnames, with a fallback to the
-shared legacy bucket for sites not migrated yet. This is the sole read path for
-media in the platform R2 account (the shared host) and on an agency cell
-(H1 per-site isolation). There is no static R2 binding: the bucket names are
+shared legacy bucket for sites not migrated yet. This is the read path for media
+in the platform R2 account (H1 per-site isolation). An agency cell serves its
+media from its own copy of this Worker (see [Agency copy](#agency-copy-hub43)).
+There is no static R2 binding: the bucket names are
 derived from the resolved slug and read with a SigV4-signed S3 GET using one
 account-scoped, Object-Read-ONLY R2 credential (Worker secrets). Handles two
 host shapes with one R2 key scheme (`<slug>/<path>`):
@@ -36,9 +37,10 @@ Deleted media moves to `trash/<date>/<key>` instead of being hard-deleted, and a
 deleted file must not stay public. The Worker refuses any request whose resolved
 R2 key or site path starts with `trash/` — `/<slug>/trash/...` and `/trash/...`
 on the shared host, `/trash/...` on a branded host — with the same plain 404 and
-short negative cache as any missing object. The refusal happens before the first
-R2 read: a trash request never reaches the bucket, so it cannot be served from
-either the per-site or the shared bucket and costs no upstream request.
+short negative cache as any missing object. The check runs after host routing and
+slug validation (so a branded host still pays its `HOSTMAP` read) and before the
+first R2 read: a trash request never reaches either the per-site or the shared
+bucket. See `isTrashRequest` in `src/index.js`.
 
 ## Bucket resolution (per-site first, shared-bucket fallback)
 
@@ -52,9 +54,10 @@ two buckets, in this order:
 
 - **404** on the primary means the per-site bucket doesn't exist yet (`NoSuchBucket`)
   or the object hasn't been copied into it (`NoSuchKey`).
-- **401/403** on the primary means the read credential can't see that bucket — the
-  state during the credential swap described below. Treating it as fall-through keeps
-  every unmigrated site serving.
+- **401/403** on the primary means the read credential cannot see that bucket. With
+  the deployed account-scoped key (below) this should not happen; fall-through keeps
+  unmigrated sites serving if it does, and the `fallback-auth-denied` log line makes
+  it visible (see [Debugging in prod](#debugging-in-prod)).
 - **Any other primary status** (200/206/304/412, and every 5xx) is returned as-is: a
   real upstream failure is never masked by a second lookup.
 - The fallback response is **not** re-interpreted: 404 there is the client's 404 (with
@@ -85,15 +88,13 @@ second attempt in `src/index.js` (`bucketAttemptOrder`), not just unsetting the 
 | `SHARED_HOST`                | var            | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
 | `MEDIA_BUCKET`               | var            | the **fallback** (shared/legacy) bucket name; defaults to `doubleyoup-media` when unset |
 
-### The read credential must become ACCOUNT-scoped before per-site buckets go live
+### The read credential is account-scoped
 
-The deployed `R2_S3_KEY`/`R2_S3_SECRET` today is the shared platform R2 key —
-**bucket-scoped to `doubleyoup-media`** (and not read-only). With that key, every
-primary (per-site) lookup is an auth denial that the fallback absorbs, so the Worker
-keeps serving correctly, but **no migrated site can be read**. Before the first
-per-site bucket goes live, mint an **account-scoped, Object-Read-only** R2 token
-(readable across the shared bucket and every `doubleyoup-media-<slug>` bucket) and
-`wrangler secret put` both values again.
+The deployed `R2_S3_KEY`/`R2_S3_SECRET` is an account-scoped, Object-Read-only R2 key
+(set 2026-08-20). It reads the shared bucket and every `doubleyoup-media-<slug>`
+bucket. Do not replace it with a bucket-scoped key: with one, every primary
+(per-site) lookup is an auth denial. The fallback hides that for unmigrated sites,
+but a migrated site's objects are no longer in the shared bucket, so they 404.
 
 ## Local dev
 
@@ -106,9 +107,10 @@ npm test           # node's built-in test runner (no framework, no network)
 `wrangler dev` runs the Worker locally against local R2/KV emulation (add
 `--remote` to hit the real bucket/namespace instead).
 
-`npm test` covers the bucket attempt order + fallback status rules (pure functions
-exported from `src/index.js`) and drives the whole request handler with the R2 S3
-endpoint stubbed at `globalThis.fetch` — no Workers runtime, no credentials.
+`npm test` covers the bucket attempt order + fallback status rules and the trash-key
+check (pure functions exported from `src/index.js`) and drives the whole request
+handler with the R2 S3 endpoint stubbed at `globalThis.fetch` — no Workers runtime,
+no credentials.
 
 ## Deploy
 
@@ -132,14 +134,10 @@ endpoint stubbed at `globalThis.fetch` — no Workers runtime, no credentials.
    Hostnames) on the zone and set its fallback origin / Worker route so that
    branded `media.<customer>` hostnames route to this Worker.
 
-**Gated prerequisites (Jason) before the shared host is served here:** this Worker
-targets the end state where it serves `media.doubleyoup.com` too, but that requires
-re-routing `media.doubleyoup.com` off its current direct-R2-custom-domain binding
-onto this Worker (a zone change, per-slug flippable during migration). Until then
-the shared host keeps serving the single legacy bucket directly and only branded
-hostnames route here. The per-site buckets are **no longer** a prerequisite for that
-re-route — an unmigrated slug is served from the shared bucket by the fallback — but
-the account-scoped read credential above is.
+The shared host `media.doubleyoup.com` routes through this Worker by a Workers route
+(2026-08-27), not by a direct-R2 custom-domain binding. A direct binding would serve
+only the shared bucket, so it could not serve a migrated site's objects, which are
+only in its per-site bucket.
 
 ### Onboarding a branded host
 
@@ -241,7 +239,7 @@ they are the triage signal:
 
 | Line | Meaning |
 | ---- | ------- |
-| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential can't see the per-site bucket. Expected for every request while the deployed key is still bucket-scoped; **after** the account-scoped key is live, a persistent stream of these means a migrated site's read is broken (missing/unscoped/revoked key) and is being silently masked by the shared bucket. |
+| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential cannot see the per-site bucket. The deployed key is account-scoped, so a steady stream of these lines means a site's per-site read is broken (missing, unscoped or revoked key) and the shared bucket is hiding that failure. |
 | `[media-worker] not-found-in-both-buckets slug=… key=… primary_bucket=… fallback_bucket=…` | the object exists in neither bucket — a genuine 404, not an auth problem. |
 
 If a *migrated* site 404s or 500s, check the read credential first: a bucket-scoped

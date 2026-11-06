@@ -32,17 +32,18 @@ This is effectively a one-file Worker:
   branded hosts, slug validation + `doubleyoup-media-<slug>` derivation, the
   primary→fallback bucket attempt order, the hand-rolled SigV4 signer + S3 GET/HEAD,
   response header assembly (content-type fallback by extension, conditional/range
-  forward-and-sign, CORS, cache-control). It also has two named exports,
-  `bucketAttemptOrder` / `shouldFallbackToSharedBucket`, purely so the bucket
-  decision is unit-testable — Cloudflare ignores named exports that aren't
-  entrypoint classes, so adding more for testing is safe.
+  forward-and-sign, CORS, cache-control). It also has three named exports,
+  `bucketAttemptOrder` / `shouldFallbackToSharedBucket` / `isTrashRequest`, purely so
+  the bucket and soft-delete decisions are unit-testable — Cloudflare ignores named
+  exports that aren't entrypoint classes, so adding more for testing is safe.
 - `wrangler.toml` — the `HOSTMAP` KV binding + `SHARED_HOST`/`MEDIA_BUCKET` vars +
   the `R2_ACCOUNT_ID`/`R2_S3_KEY`/`R2_S3_SECRET` read-credential secrets (set via
   `wrangler secret put`, not in the toml) + deploy steps in the header comment.
   No R2 binding.
-- `test/` — `node:test` files run by `npm test`: `bucket-selection.test.js` (the two
+- `test/` — `node:test` files run by `npm test`: `bucket-selection.test.js` (the three
   pure functions) and `fallback-flow.test.js` (the real handler with `globalThis.fetch`
-  stubbed in place of the R2 S3 endpoint). No framework, no network, no credentials.
+  stubbed in place of the R2 S3 endpoint, including the trash refusals). No framework,
+  no network, no credentials.
 - `package.json` — the wrangler scripts + `test`; `"type": "module"` so plain `node`
   loads the ESM source. Only devDependency is wrangler.
 
@@ -50,7 +51,8 @@ This is effectively a one-file Worker:
 
 - **Two bucket attempts per request, primary always first.** `doubleyoup-media-<slug>`
   is tried first; the shared bucket (`MEDIA_BUCKET`, default `doubleyoup-media`) is
-  tried ONLY if the primary returned 404/401/403. `MEDIA_BUCKET` is the FALLBACK name —
+  tried ONLY if the primary returned 404/401/403. `MEDIA_BUCKET = "none"` or `"off"`
+  turns the fallback off (an agency copy has no shared bucket). `MEDIA_BUCKET` is the FALLBACK name —
   it used to pin every slug to the shared bucket, and code/docs written before that
   change may still describe it that way. Never let it override the primary.
 - **Only 404/401/403 fall through, and only from the primary.** 5xx from the primary
@@ -131,7 +133,7 @@ This is effectively a one-file Worker:
 - Don't hand-parse `If-*`/`Range` headers — forward them on the upstream S3 GET
   AND include them in the SigV4 signature (unsigned response-affecting headers can
   be rejected by R2); let R2 apply the semantics.
-- Don't flip `media.doubleyoup.com` onto this Worker yourself — that re-route (off
-  its direct-R2-custom-domain binding) plus the per-site buckets existing are
-  gated prerequisites owned by Jason; the code is built for that end state but the
-  zone change is not part of a code deploy.
+- Don't change the `media.doubleyoup.com` Workers route (or point the shared host
+  back at a direct-R2 custom-domain binding) yourself — the route is a zone change
+  owned by Jason, not part of a code deploy. A direct binding serves only the shared
+  bucket, so every migrated site's media would 404.
