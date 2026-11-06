@@ -1,17 +1,17 @@
 # media-worker.doubleyoup.com
 
-Cloudflare Worker that serves each site's **own** R2 bucket
-(`doubleyoup-media-<slug>`) as public, cacheable media — the sole read path for
-every site's offloaded media on the doubleyoup platform (H1 per-site isolation) —
-falling back to the shared legacy bucket for sites not migrated yet (see
-[Bucket resolution](#bucket-resolution-per-site-first-shared-bucket-fallback)).
-There is no static R2 binding: the bucket names are derived from the resolved slug
-and read with a SigV4-signed S3 GET using one account-scoped, Object-Read-ONLY R2
-credential (Worker secrets). Handles two host shapes with one R2 key scheme
-(`<slug>/<path>`):
+Cloudflare Worker serving each site's own `doubleyoup-media-<slug>` R2 bucket
+for the shared host and branded per-site hostnames, with a fallback to the
+shared legacy bucket for sites not migrated yet. This is the sole read path for
+media in the platform R2 account (the shared host) and on an agency cell
+(H1 per-site isolation). There is no static R2 binding: the bucket names are
+derived from the resolved slug and read with a SigV4-signed S3 GET using one
+account-scoped, Object-Read-ONLY R2 credential (Worker secrets). Handles two
+host shapes with one R2 key scheme (`<slug>/<path>`):
 
-1. **Shared host** — `media.doubleyoup.com/<slug>/<path>`. The slug is already
-   the first path segment, so the R2 key is just the path.
+1. **Shared host** — `media.doubleyoup.com/<slug>/<path>`. Served via a Worker
+   route (2026-08-27). The slug is already the first path segment, so the R2 key is
+   just the path.
 2. **Branded per-site hostnames** — `media.<customer-domain>/<path>`, attached
    to this Worker via Cloudflare for SaaS. The hostname is resolved to a slug
    through the `HOSTMAP` KV namespace (`hostname -> slug`), then the same

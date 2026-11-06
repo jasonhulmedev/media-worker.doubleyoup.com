@@ -89,11 +89,10 @@ This is effectively a one-file Worker:
 
 ## Gotchas
 
-- **The deployed read credential is BUCKET-scoped to the shared bucket today**, so every
-  per-site (primary) lookup in prod is currently an auth denial absorbed by the fallback.
-  That is fine while nothing is migrated, but a site migrated into its own bucket will
-  404 until an ACCOUNT-scoped Object-Read-only R2 token is `wrangler secret put` over
-  `R2_S3_KEY`/`R2_S3_SECRET`. Check this first when a migrated site serves 404/500.
+- **The deployed read credential is an account-scoped, Object-Read-only R2 key (set
+  2026-08-20).** It reads the shared bucket and every per-site bucket. If a migrated site
+  serves 404 or 500, check this key first. A bucket-scoped key makes every per-site read
+  fail, and the fallback hides the failure.
 - **This is a Cloudflare Worker, not a Node service.** No `server.mjs`/Express,
   no constellation container, no `infra/constellation` entry, no BullMQ, no
   outbound HTTP to `app`/`orchestrator`. Don't try to run this like the other
@@ -109,15 +108,9 @@ This is effectively a one-file Worker:
   — a fresh clone/fresh Cloudflare account needs `wrangler kv namespace create
   HOSTMAP` run once (id pasted in), `R2_ACCOUNT_ID` set, and `wrangler secret put
   R2_S3_KEY` / `R2_S3_SECRET` before `wrangler deploy` (or `dev --remote`) works.
-- **The shared host `media.doubleyoup.com` is NOT yet routed through this Worker.**
-  The code targets the end state where it is (deriving the bucket from the path's
-  first segment), but re-pointing `media.doubleyoup.com` off its current
-  direct-R2-custom-domain binding onto this Worker is a **gated deploy step**
-  (Jason). It no longer requires the per-site buckets to exist first — the
-  shared-bucket fallback serves unmigrated slugs — but it does require the
-  account-scoped read credential. Until that flip, only branded `media.<customer>`
-  hostnames route here and the shared host serves the single legacy bucket
-  directly. Do not assume the shared host hits this Worker in prod today.
+- **The shared host `media.doubleyoup.com` serves through a Workers route (2026-08-27).**
+  The bucket name comes from the path's first segment. Unmigrated slugs (including
+  local-Docker sites) fall back to the shared bucket.
 - **`SHARED_HOST` is compared case-insensitively** (`url.hostname.toLowerCase()`
   vs `(env.SHARED_HOST || "media.doubleyoup.com").toLowerCase()`) — if you ever
   need multiple shared hosts, this single-var comparison won't extend cleanly;
