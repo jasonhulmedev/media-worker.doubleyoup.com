@@ -6,7 +6,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { bucketAttemptOrder, isTrashRequest, shouldFallbackToSharedBucket } from "../src/index.js";
+import {
+  bucketAttemptOrder,
+  isTrashRequest,
+  shouldFallbackToSharedBucket,
+  siteSlugFromPrefixSegment,
+} from "../src/index.js";
 
 const SLUG = "rareepicgamer-19f933";
 
@@ -80,4 +85,12 @@ test("ordinary media keys, and trash-looking names that are not the trash prefix
   assert.equal(isTrashRequest(`${SLUG}/2025/08/trash-can.jpg`, "2025/08/trash-can.jpg"), false);
   assert.equal(isTrashRequest(`${SLUG}/trash`, "trash"), false);
   assert.equal(isTrashRequest(`${SLUG}/trashier/photo.jpg`, "trashier/photo.jpg"), false);
+});
+
+// orchestrator#84: shared-host staging prefix "sg-<slug>" belongs to site <slug>.
+test("siteSlugFromPrefixSegment strips a leading sg- and leaves other segments alone", () => {
+  assert.equal(siteSlugFromPrefixSegment("sg-acme"), "acme");
+  assert.equal(siteSlugFromPrefixSegment("acme"), "acme");
+  assert.equal(siteSlugFromPrefixSegment("sg-"), "");
+  assert.equal(siteSlugFromPrefixSegment("xsg-acme"), "xsg-acme");
 });
