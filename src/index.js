@@ -66,6 +66,23 @@ const EXPOSED_HEADERS = "content-length, content-range, etag, accept-ranges";
 // bucket-name limit; this matches app's uniqueSlug cap (<=46 chars).
 const SLUG_PATTERN = /^[a-z0-9-]{1,46}$/;
 
+// orchestrator#84: a staging site writes its media to "sg-<live prefix>/..." in the SAME
+// bucket as the live site. On the shared host the first path segment is therefore either
+// a site slug or "sg-" + a site slug. The capture is validated against SLUG_PATTERN by
+// the caller, so the prefix segment is at most 3 + 46 = 49 chars and a longer one is refused.
+// The capture is "(.*)", not "(.+)", so a bare "sg-" yields an empty slug that fails
+// SLUG_PATTERN and is refused, rather than falling through as the slug "sg-".
+const STAGING_PREFIX_PATTERN = /^sg-(.*)$/;
+
+// Which site slug (and so which bucket) a shared-host first path segment belongs to.
+// "sg-acme" belongs to site "acme"; the object key still keeps the full "sg-acme/..." path.
+// Exported (like the bucket helpers) purely so it is unit-testable.
+export function siteSlugFromPrefixSegment(prefixSegment) {
+  const stagingMatch = STAGING_PREFIX_PATTERN.exec(prefixSegment);
+  if (!stagingMatch) return prefixSegment;
+  return stagingMatch[1];
+}
+
 // ── Bucket selection (per-site primary, shared-bucket fallback) ───────────────
 
 // The single legacy bucket every site's media lived in before per-site buckets.
@@ -427,16 +444,22 @@ export default {
       // source changed (per-site bucket instead of one shared static binding).
       let slug;
       let key;
+      // The first segment of the key: the slug itself, or "sg-<slug>" for a staging
+      // prefix on the shared host (orchestrator#84). Used to cut the site path off the key.
+      let keyPrefix;
       if (host === sharedHost) {
         // /<slug>/<rest> — the slug prefix is already in the path, so the key is
-        // the path unchanged and the slug is the first segment.
+        // the path unchanged. The first segment is the key prefix; the slug (which
+        // picks the bucket) is that segment, minus a leading "sg-".
         key = path;
-        slug = path.split("/")[0];
+        keyPrefix = path.split("/")[0];
+        slug = siteSlugFromPrefixSegment(keyPrefix);
       } else {
         // Branded host — map host -> slug via KV, then prepend the slug prefix.
         const mappedSlug = await env.HOSTMAP.get(host);
         if (!mappedSlug) return notFound(method);
         slug = mappedSlug;
+        keyPrefix = mappedSlug;
         key = path ? `${slug}/${path}` : slug;
       }
       if (!key) return notFound(method);
@@ -448,7 +471,7 @@ export default {
       // /trash/<date>/<slug>/<file>, where "trash" sits in the slug position), the
       // site path covers trash/ inside the site's namespace (/trash/... on a
       // branded host, /<slug>/trash/... on the shared one).
-      const sitePath = key.slice(slug.length + 1); // key is always "<slug>/<path>"
+      const sitePath = key.slice(keyPrefix.length + 1); // key is always "<prefix>/<path>"
       if (isTrashRequest(key, sitePath)) return notFound(method);
 
       // Read credential is an Object-Read-ONLY R2 token held as a Worker secret (never
