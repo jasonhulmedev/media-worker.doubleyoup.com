@@ -6,7 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { bucketAttemptOrder, isTrashRequest, shouldFallbackToSharedBucket } from "../src/index.js";
+import {
+  bucketAttemptOrder,
+  isTrashRequest,
+  shouldFallbackToSharedBucket,
+  siteSlugFromPrefixSegment,
+  liveKeyForStagingKey,
+} from "../src/index.js";
 
 const SLUG = "rareepicgamer-19f933";
 
@@ -80,4 +86,27 @@ test("ordinary media keys, and trash-looking names that are not the trash prefix
   assert.equal(isTrashRequest(`${SLUG}/2025/08/trash-can.jpg`, "2025/08/trash-can.jpg"), false);
   assert.equal(isTrashRequest(`${SLUG}/trash`, "trash"), false);
   assert.equal(isTrashRequest(`${SLUG}/trashier/photo.jpg`, "trashier/photo.jpg"), false);
+});
+
+// orchestrator#84: shared-host staging prefix "sg-<slug>" belongs to site <slug>.
+test("siteSlugFromPrefixSegment strips a leading sg- and leaves other segments alone", () => {
+  assert.equal(siteSlugFromPrefixSegment("sg-acme"), "acme");
+  assert.equal(siteSlugFromPrefixSegment("acme"), "acme");
+  assert.equal(siteSlugFromPrefixSegment("sg-"), "");
+  assert.equal(siteSlugFromPrefixSegment("xsg-acme"), "xsg-acme");
+});
+
+test("liveKeyForStagingKey maps sg-<slug>/<path> to <slug>/<path>", () => {
+  assert.equal(
+    liveKeyForStagingKey("acme", "sg-acme", "sg-acme/2026/11/x.png"),
+    "acme/2026/11/x.png",
+  );
+  assert.equal(
+    liveKeyForStagingKey("docs-892769", "sg-docs-892769", "sg-docs-892769/2026/11/x.png"),
+    "docs-892769/2026/11/x.png",
+  );
+});
+
+test("liveKeyForStagingKey returns null when the key has no staging prefix", () => {
+  assert.equal(liveKeyForStagingKey("acme", "acme", "acme/2026/11/x.png"), null);
 });

@@ -1,25 +1,26 @@
 # media-worker.doubleyoup.com
 
-Cloudflare Worker that serves each site's **own** R2 bucket
-(`doubleyoup-media-<slug>`) as public, cacheable media — the sole read path for
-every site's offloaded media on the doubleyoup platform (H1 per-site isolation) —
-falling back to the shared legacy bucket for sites not migrated yet (see
-[Bucket resolution](#bucket-resolution-per-site-first-shared-bucket-fallback)).
-There is no static R2 binding: the bucket names are derived from the resolved slug
-and read with a SigV4-signed S3 GET using one account-scoped, Object-Read-ONLY R2
-credential (Worker secrets). Handles two host shapes with one R2 key scheme
-(`<slug>/<path>`):
+Cloudflare Worker serving each site's own `doubleyoup-media-<slug>` R2 bucket
+for the shared host and branded per-site hostnames, with a fallback to the
+shared legacy bucket for sites not migrated yet. This is the read path for media
+in the platform R2 account (H1 per-site isolation). An agency cell serves its
+media from its own copy of this Worker (see [Agency copy](#agency-copy-hub43)).
+There is no static R2 binding: the bucket names are
+derived from the resolved slug and read with a SigV4-signed S3 GET using one
+account-scoped, Object-Read-ONLY R2 credential (Worker secrets). Handles two
+host shapes with one R2 key scheme (`<slug>/<path>`):
 
-1. **Shared host** — `media.doubleyoup.com/<slug>/<path>`. The slug is already
-   the first path segment, so the R2 key is just the path.
+1. **Shared host** — `media.doubleyoup.com/<slug>/<path>`. Served via a Worker
+   route (2026-08-27). The slug is already the first path segment, so the R2 key is
+   just the path.
 2. **Branded per-site hostnames** — `media.<customer-domain>/<path>`, attached
    to this Worker via Cloudflare for SaaS. The hostname is resolved to a slug
    through the `HOSTMAP` KV namespace (`hostname -> slug`), then the same
    `<slug>/<path>` key is served.
 
 This is a **Cloudflare Worker**, not a Node service — no server process, no
-constellation container, no BullMQ. It's deployed with `wrangler` and runs on
-Cloudflare's edge.
+constellation container, no BullMQ. It deploys from `main` through Workers
+Builds (see [Deploy](#deploy)) and runs on Cloudflare's edge.
 
 Only `GET`/`HEAD` are accepted (405 otherwise). Responses honor conditional
 requests (`If-None-Match` → 304) and `Range` requests (→ 206 with
@@ -36,9 +37,10 @@ Deleted media moves to `trash/<date>/<key>` instead of being hard-deleted, and a
 deleted file must not stay public. The Worker refuses any request whose resolved
 R2 key or site path starts with `trash/` — `/<slug>/trash/...` and `/trash/...`
 on the shared host, `/trash/...` on a branded host — with the same plain 404 and
-short negative cache as any missing object. The refusal happens before the first
-R2 read: a trash request never reaches the bucket, so it cannot be served from
-either the per-site or the shared bucket and costs no upstream request.
+short negative cache as any missing object. The check runs after host routing and
+slug validation (so a branded host still pays its `HOSTMAP` read) and before the
+first R2 read: a trash request never reaches either the per-site or the shared
+bucket. See `isTrashRequest` in `src/index.js`.
 
 ## Bucket resolution (per-site first, shared-bucket fallback)
 
@@ -52,9 +54,10 @@ two buckets, in this order:
 
 - **404** on the primary means the per-site bucket doesn't exist yet (`NoSuchBucket`)
   or the object hasn't been copied into it (`NoSuchKey`).
-- **401/403** on the primary means the read credential can't see that bucket — the
-  state during the credential swap described below. Treating it as fall-through keeps
-  every unmigrated site serving.
+- **401/403** on the primary means the read credential cannot see that bucket. With
+  the deployed account-scoped key (below) this should not happen; fall-through keeps
+  unmigrated sites serving if it does, and the `fallback-auth-denied` log line makes
+  it visible (see [Debugging in prod](#debugging-in-prod)).
 - **Any other primary status** (200/206/304/412, and every 5xx) is returned as-is: a
   real upstream failure is never masked by a second lookup.
 - The fallback response is **not** re-interpreted: 404 there is the client's 404 (with
@@ -80,20 +83,18 @@ second attempt in `src/index.js` (`bucketAttemptOrder`), not just unsetting the 
 | Binding                      | Type           | Purpose                                                          |
 | ---------------------------- | -------------- | ----------------------------------------------------------------- |
 | `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one account-scoped, **Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of the shared bucket **and** every per-site `doubleyoup-media-<slug>` bucket (`wrangler secret put`) |
-| `R2_ACCOUNT_ID`              | var/secret     | Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` |
+| `R2_ACCOUNT_ID`              | Worker secret  | Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` |
 | `HOSTMAP`                    | KV namespace   | branded hostname → slug lookup                                   |
 | `SHARED_HOST`                | var            | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
 | `MEDIA_BUCKET`               | var            | the **fallback** (shared/legacy) bucket name; defaults to `doubleyoup-media` when unset |
 
-### The read credential must become ACCOUNT-scoped before per-site buckets go live
+### The read credential is account-scoped
 
-The deployed `R2_S3_KEY`/`R2_S3_SECRET` today is the shared platform R2 key —
-**bucket-scoped to `doubleyoup-media`** (and not read-only). With that key, every
-primary (per-site) lookup is an auth denial that the fallback absorbs, so the Worker
-keeps serving correctly, but **no migrated site can be read**. Before the first
-per-site bucket goes live, mint an **account-scoped, Object-Read-only** R2 token
-(readable across the shared bucket and every `doubleyoup-media-<slug>` bucket) and
-`wrangler secret put` both values again.
+The deployed `R2_S3_KEY`/`R2_S3_SECRET` is an account-scoped, Object-Read-only R2 key
+(set 2026-08-20). It reads the shared bucket and every `doubleyoup-media-<slug>`
+bucket. Do not replace it with a bucket-scoped key: with one, every primary
+(per-site) lookup is an auth denial. The fallback hides that for unmigrated sites,
+but a migrated site's objects are no longer in the shared bucket, so they 404.
 
 ## Local dev
 
@@ -106,11 +107,37 @@ npm test           # node's built-in test runner (no framework, no network)
 `wrangler dev` runs the Worker locally against local R2/KV emulation (add
 `--remote` to hit the real bucket/namespace instead).
 
-`npm test` covers the bucket attempt order + fallback status rules (pure functions
-exported from `src/index.js`) and drives the whole request handler with the R2 S3
-endpoint stubbed at `globalThis.fetch` — no Workers runtime, no credentials.
+`npm test` covers the bucket attempt order + fallback status rules and the trash-key
+check (pure functions exported from `src/index.js`) and drives the whole request
+handler with the R2 S3 endpoint stubbed at `globalThis.fetch` — no Workers runtime,
+no credentials.
 
 ## Deploy
+
+The platform Worker `doubleyoup-media` deploys from `main` through Cloudflare Workers
+Builds. Settings in the doubleyoup Cloudflare account:
+
+| Setting                   | Value                     |
+| ------------------------- | ------------------------- |
+| Production branch         | `main`                    |
+| Root directory            | `/`                       |
+| Build command             | `npm install && npm test` |
+| Deploy command            | `npx wrangler deploy`     |
+| Builds for other branches | off                       |
+
+A merge into `main` is live in about a minute. Only the release PR from `dev` merges
+into `main`; agent merges into `dev` deploy nothing. A failing `npm test` stops the
+deploy. The build uses `npm install` because the repo has no lockfile (hub#236).
+
+`wrangler deploy` keeps the Worker secrets and replaces the plain vars with `[vars]` of
+`wrangler.toml`. `R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET` must stay secrets: a
+plain var that is not in `[vars]` is removed by the next deploy, and every read then
+fails.
+
+An agency copy in an agency's own Cloudflare account is not connected. Deploy it by
+hand from its own copy (see [Agency copy](#agency-copy-hub43)).
+
+### First setup in a new account
 
 1. Create the KV namespace and paste the returned `id` into the
    `[[kv_namespaces]]` block in `wrangler.toml` (replacing
@@ -118,28 +145,23 @@ endpoint stubbed at `globalThis.fetch` — no Workers runtime, no credentials.
    ```
    wrangler kv namespace create HOSTMAP
    ```
-2. Set `R2_ACCOUNT_ID` under `[vars]` and add the read credential secrets:
+2. Add the three secrets:
    ```
+   wrangler secret put R2_ACCOUNT_ID  # Cloudflare account id
    wrangler secret put R2_S3_KEY      # account-scoped R2 token access key id (Object Read only)
    wrangler secret put R2_S3_SECRET   # its secret access key
    ```
 3. Confirm `SHARED_HOST` under `[vars]` matches the shared media host.
-4. Deploy:
-   ```
-   npm run deploy      # wrangler deploy
-   ```
+4. Run the first `wrangler deploy` by hand, then connect the repo with Workers Builds
+   using the settings above.
 5. In the Cloudflare dashboard, enable **Cloudflare for SaaS** (Custom
    Hostnames) on the zone and set its fallback origin / Worker route so that
    branded `media.<customer>` hostnames route to this Worker.
 
-**Gated prerequisites (Jason) before the shared host is served here:** this Worker
-targets the end state where it serves `media.doubleyoup.com` too, but that requires
-re-routing `media.doubleyoup.com` off its current direct-R2-custom-domain binding
-onto this Worker (a zone change, per-slug flippable during migration). Until then
-the shared host keeps serving the single legacy bucket directly and only branded
-hostnames route here. The per-site buckets are **no longer** a prerequisite for that
-re-route — an unmigrated slug is served from the shared bucket by the fallback — but
-the account-scoped read credential above is.
+The shared host `media.doubleyoup.com` routes through this Worker by a Workers route
+(2026-08-27), not by a direct-R2 custom-domain binding. A direct binding would serve
+only the shared bucket, so it could not serve a migrated site's objects, which are
+only in its per-site bucket.
 
 ### Onboarding a branded host
 
@@ -164,7 +186,7 @@ buckets and the platform holds no key to them. Use `wrangler.agency.toml.example
 3. Keep `MEDIA_BUCKET = "none"`. It turns the shared fallback bucket off (the agency has no such bucket).
 4. In the agency's R2 dashboard create an Object-Read-ONLY key that is ACCOUNT-WIDE (Object Read on ALL buckets of the account), not a list of buckets. A new site's bucket `doubleyoup-media-<slug>` is then covered without a change to the key. A key that names buckets makes the Worker answer 500 for every object of a new site (an R2 403 becomes an internal error here). The orchestrator checks this after it provisions a new site: it asks for an object that cannot exist and only a 404 passes (hub#43 M7). Set the three secrets with
    `wrangler secret put R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET`.
-5. `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
+5. Deploy by hand with `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
 6. Move a site with `npm run media-relocate` in the orchestrator (dry run first). It copies the objects into the
    agency bucket `doubleyoup-media-<slug>`, switches the site's constants to this host, and verifies.
 
@@ -217,7 +239,7 @@ One-time setup per agency; every value below is a placeholder:
    wrangler kv namespace create HOSTMAP
    ```
    Paste the id into the `[[kv_namespaces]]` block of the agency `wrangler.toml`
-   and redeploy the agency media Worker.
+   and redeploy the agency media Worker by hand.
 4. **Point the orchestrator at it.** Set `MEDIA_WORKER_SCRIPT` (default
    `doubleyoup-media`) and `MEDIA_HOSTMAP_KV_ID` (the new namespace id) on the
    agency-orchestrator Worker.
@@ -241,7 +263,7 @@ they are the triage signal:
 
 | Line | Meaning |
 | ---- | ------- |
-| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential can't see the per-site bucket. Expected for every request while the deployed key is still bucket-scoped; **after** the account-scoped key is live, a persistent stream of these means a migrated site's read is broken (missing/unscoped/revoked key) and is being silently masked by the shared bucket. |
+| `[media-worker] fallback-auth-denied status=<401\|403> slug=… primary_bucket=… key=…` | the read credential cannot see the per-site bucket. The deployed key is account-scoped, so a steady stream of these lines means a site's per-site read is broken (missing, unscoped or revoked key) and the shared bucket is hiding that failure. |
 | `[media-worker] not-found-in-both-buckets slug=… key=… primary_bucket=… fallback_bucket=…` | the object exists in neither bucket — a genuine 404, not an auth problem. |
 
 If a *migrated* site 404s or 500s, check the read credential first: a bucket-scoped
