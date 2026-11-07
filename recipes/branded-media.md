@@ -44,6 +44,9 @@ own direct `r2.dev` custom-domain binding and is unaffected by any of this.
 Run from a shell with `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` exported
 (sourced from the constellation `.env`; never echo them).
 
+This was the first deploy only. Since 2026-11-06 the Worker deploys from `main` through
+Workers Builds (see `README.md` "Deploy"); do not deploy it by hand.
+
 1. Create the KV namespace, paste the id into `wrangler.toml [[kv_namespaces]]`:
    ```
    wrangler kv namespace create HOSTMAP        # -> id 8c2b24a66e79416f81f646f90683e5c4

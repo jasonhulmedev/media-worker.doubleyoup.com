@@ -19,8 +19,8 @@ host shapes with one R2 key scheme (`<slug>/<path>`):
    `<slug>/<path>` key is served.
 
 This is a **Cloudflare Worker**, not a Node service — no server process, no
-constellation container, no BullMQ. It's deployed with `wrangler` and runs on
-Cloudflare's edge.
+constellation container, no BullMQ. It deploys from `main` through Workers
+Builds (see [Deploy](#deploy)) and runs on Cloudflare's edge.
 
 Only `GET`/`HEAD` are accepted (405 otherwise). Responses honor conditional
 requests (`If-None-Match` → 304) and `Range` requests (→ 206 with
@@ -83,7 +83,7 @@ second attempt in `src/index.js` (`bucketAttemptOrder`), not just unsetting the 
 | Binding                      | Type           | Purpose                                                          |
 | ---------------------------- | -------------- | ----------------------------------------------------------------- |
 | `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one account-scoped, **Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of the shared bucket **and** every per-site `doubleyoup-media-<slug>` bucket (`wrangler secret put`) |
-| `R2_ACCOUNT_ID`              | var/secret     | Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` |
+| `R2_ACCOUNT_ID`              | Worker secret  | Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` |
 | `HOSTMAP`                    | KV namespace   | branded hostname → slug lookup                                   |
 | `SHARED_HOST`                | var            | the shared host (`media.doubleyoup.com`) whose path already starts with the slug |
 | `MEDIA_BUCKET`               | var            | the **fallback** (shared/legacy) bucket name; defaults to `doubleyoup-media` when unset |
@@ -114,22 +114,46 @@ no credentials.
 
 ## Deploy
 
+The platform Worker `doubleyoup-media` deploys from `main` through Cloudflare Workers
+Builds. Settings in the doubleyoup Cloudflare account:
+
+| Setting                   | Value                     |
+| ------------------------- | ------------------------- |
+| Production branch         | `main`                    |
+| Root directory            | `/`                       |
+| Build command             | `npm install && npm test` |
+| Deploy command            | `npx wrangler deploy`     |
+| Builds for other branches | off                       |
+
+A merge into `main` is live in about a minute. Only the release PR from `dev` merges
+into `main`; agent merges into `dev` deploy nothing. A failing `npm test` stops the
+deploy. The build uses `npm install` because the repo has no lockfile (hub#236).
+
+`wrangler deploy` keeps the Worker secrets and replaces the plain vars with `[vars]` of
+`wrangler.toml`. `R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET` must stay secrets: a
+plain var that is not in `[vars]` is removed by the next deploy, and every read then
+fails.
+
+An agency copy in an agency's own Cloudflare account is not connected. Deploy it by
+hand from its own copy (see [Agency copy](#agency-copy-hub43)).
+
+### First setup in a new account
+
 1. Create the KV namespace and paste the returned `id` into the
    `[[kv_namespaces]]` block in `wrangler.toml` (replacing
    `REPLACE_WITH_KV_ID` — this id is per-account and not committed pre-filled):
    ```
    wrangler kv namespace create HOSTMAP
    ```
-2. Set `R2_ACCOUNT_ID` under `[vars]` and add the read credential secrets:
+2. Add the three secrets:
    ```
+   wrangler secret put R2_ACCOUNT_ID  # Cloudflare account id
    wrangler secret put R2_S3_KEY      # account-scoped R2 token access key id (Object Read only)
    wrangler secret put R2_S3_SECRET   # its secret access key
    ```
 3. Confirm `SHARED_HOST` under `[vars]` matches the shared media host.
-4. Deploy:
-   ```
-   npm run deploy      # wrangler deploy
-   ```
+4. Run the first `wrangler deploy` by hand, then connect the repo with Workers Builds
+   using the settings above.
 5. In the Cloudflare dashboard, enable **Cloudflare for SaaS** (Custom
    Hostnames) on the zone and set its fallback origin / Worker route so that
    branded `media.<customer>` hostnames route to this Worker.
@@ -162,7 +186,7 @@ buckets and the platform holds no key to them. Use `wrangler.agency.toml.example
 3. Keep `MEDIA_BUCKET = "none"`. It turns the shared fallback bucket off (the agency has no such bucket).
 4. In the agency's R2 dashboard create an Object-Read-ONLY key that is ACCOUNT-WIDE (Object Read on ALL buckets of the account), not a list of buckets. A new site's bucket `doubleyoup-media-<slug>` is then covered without a change to the key. A key that names buckets makes the Worker answer 500 for every object of a new site (an R2 403 becomes an internal error here). The orchestrator checks this after it provisions a new site: it asks for an object that cannot exist and only a 404 passes (hub#43 M7). Set the three secrets with
    `wrangler secret put R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET`.
-5. `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
+5. Deploy by hand with `wrangler deploy`. Check one object: `curl -sI https://<host>/<slug>/<key>`.
 6. Move a site with `npm run media-relocate` in the orchestrator (dry run first). It copies the objects into the
    agency bucket `doubleyoup-media-<slug>`, switches the site's constants to this host, and verifies.
 
@@ -215,7 +239,7 @@ One-time setup per agency; every value below is a placeholder:
    wrangler kv namespace create HOSTMAP
    ```
    Paste the id into the `[[kv_namespaces]]` block of the agency `wrangler.toml`
-   and redeploy the agency media Worker.
+   and redeploy the agency media Worker by hand.
 4. **Point the orchestrator at it.** Set `MEDIA_WORKER_SCRIPT` (default
    `doubleyoup-media`) and `MEDIA_HOSTMAP_KV_ID` (the new namespace id) on the
    agency-orchestrator Worker.
