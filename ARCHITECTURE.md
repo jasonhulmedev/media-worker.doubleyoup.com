@@ -146,7 +146,7 @@ never reaches either bucket. Tests: `test/bucket-selection.test.js` and
 | Binding          | Type          | Source of truth                                                    |
 | ---------------- | ------------- | -------------------------------------------------------------------- |
 | `R2_S3_KEY` / `R2_S3_SECRET` | Worker secrets | one **account-scoped, Object-Read-ONLY** R2 S3 credential used to SigV4-sign reads of the shared bucket AND every per-site `doubleyoup-media-<slug>` bucket. Never held in a tenant container (that's the per-site *write* credential, which is bucket-scoped). Set via `wrangler secret put`. The deployed key is account-scoped (2026-08-20). A bucket-scoped key would make every per-site read fail. |
-| `R2_ACCOUNT_ID`  | plaintext var | the Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com` (not secret) |
+| `R2_ACCOUNT_ID`  | Worker secret | the Cloudflare account id in the R2 S3 endpoint host `<id>.r2.cloudflarestorage.com`. Must stay a secret: `wrangler deploy` removes a plain var that is not in `[vars]`. |
 | `HOSTMAP`        | KV namespace  | `hostname -> slug`; written by `orchestrator.doubleyoup.com`'s domain automation when a branded media host is onboarded (or manually via `wrangler kv key put`) |
 | `SHARED_HOST`    | plaintext var | the one host treated as "path already has the slug" (`media.doubleyoup.com`) |
 | `MEDIA_BUCKET`   | plaintext var | the **fallback** (shared/legacy) bucket tried when the per-site bucket 404/401/403s; defaults to `doubleyoup-media`; `none` or `off` turns the fallback off (agency copy). Never overrides the per-site primary. |

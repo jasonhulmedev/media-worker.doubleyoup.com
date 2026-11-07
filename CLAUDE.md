@@ -14,7 +14,7 @@ is gotchas + conventions.
 npm install
 npm test             # node --test (built-in runner, no framework) — src/index.js unit + handler tests
 npm run dev          # wrangler dev — local R2/KV emulation (--remote for real bucket/namespace)
-npm run deploy       # wrangler deploy
+npm run deploy       # wrangler deploy — agency copies only; the platform Worker deploys from main
 npm run tail         # wrangler tail — live log from the deployed Worker
 ```
 
@@ -38,7 +38,7 @@ This is effectively a one-file Worker:
   exports that aren't entrypoint classes, so adding more for testing is safe.
 - `wrangler.toml` — the `HOSTMAP` KV binding + `SHARED_HOST`/`MEDIA_BUCKET` vars +
   the `R2_ACCOUNT_ID`/`R2_S3_KEY`/`R2_S3_SECRET` read-credential secrets (set via
-  `wrangler secret put`, not in the toml) + deploy steps in the header comment.
+  `wrangler secret put`, not in the toml) + first-setup steps in the header comment.
   No R2 binding.
 - `test/` — `node:test` files run by `npm test`: `bucket-selection.test.js` (the three
   pure functions) and `fallback-flow.test.js` (the real handler with `globalThis.fetch`
@@ -100,6 +100,14 @@ This is effectively a one-file Worker:
   outbound HTTP to `app`/`orchestrator`. Don't try to run this like the other
   doubleyoup services (`npm start`, dev-boot scripts, etc.) — `wrangler dev` /
   `wrangler deploy` are the only two ways this code runs.
+- **The platform Worker `doubleyoup-media` deploys from `main` through Workers Builds**
+  (build `npm install && npm test`, deploy `npx wrangler deploy`, other branches off).
+  Only the release PR from `dev` reaches `main`; a merge into `dev` deploys nothing.
+  Don't deploy it by hand. An agency copy is not connected: deploy it by hand. See
+  `README.md` "Deploy".
+- **`R2_ACCOUNT_ID`, `R2_S3_KEY` and `R2_S3_SECRET` must stay Worker secrets.**
+  `wrangler deploy` keeps secrets but replaces plain vars with `[vars]` of
+  `wrangler.toml`, so a plain var would be removed by the next deploy.
 - **Branded hosts return a bare 404 if `HOSTMAP` has no entry** — there's no
   distinction in the response between "unknown host" and "unknown path" once a
   host resolves to a slug. If a customer domain serves 404s for everything,
