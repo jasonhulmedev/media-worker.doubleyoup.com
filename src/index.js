@@ -8,10 +8,21 @@
 // the plain 404 (short negative cache) BEFORE the first R2 read — a deleted
 // file must not stay public. Same refusal on the shared host and branded hosts.
 //
-// Slug + key resolution (UNCHANGED from the single-bucket era):
-//   • shared host (SHARED_HOST): the slug is the first path segment — key = path.
+// Slug + key resolution:
+//   • shared host (SHARED_HOST): the first path segment is either the slug or the
+//     staging prefix "sg-<slug>" (orchestrator#84). The key is the path as given;
+//     the slug (which picks the bucket) is the segment minus a leading "sg-".
 //   • branded host: look the Host up in KV (HOSTMAP: hostname -> slug) and prepend
 //     the slug — key = "<slug>/" + path.
+//
+// Staging live-key fallback (orchestrator#84, infra#151): a staging site writes new media
+// to "sg-<slug>/<path>", but its DB is a copy of live, so every image copied from live is
+// requested as "sg-<slug>/<path>" while the object sits at the live key "<slug>/<path>".
+// So for an "sg-" request the whole bucket read below (per-site bucket, then shared
+// bucket) runs for the staging key first, and runs once more for the live key ONLY when
+// that read ended in a 404 (not a 5xx, not a 401/403). A 200 served from the live key gets
+// a short Cache-Control, never the immutable one: the same "sg-<slug>/<path>" URL must serve
+// the staging object as soon as staging writes that key. Branded hosts never take this path.
 //
 // Bucket resolution (TWO ATTEMPTS, per-site first): each site gets its OWN R2 bucket
 //   "doubleyoup-media-<slug>" (H1 per-site isolation), but sites are migrated into those
@@ -54,6 +65,10 @@
 const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
 const NOT_FOUND_CACHE = "public, max-age=60"; // small + cacheable, so a bad/unknown
 // path or host doesn't hammer KV/R2 on every repeat request.
+// A response served from the LIVE key for a staging "sg-<slug>/<path>" URL. Short, not
+// immutable: once staging writes its own "sg-<slug>/<path>" object, the same URL must
+// start serving it, so a long-lived cached copy of the live bytes would hide it.
+const LIVE_KEY_FALLBACK_CACHE = "public, max-age=300";
 const ALLOWED_METHODS = "GET, HEAD";
 const EXPOSED_HEADERS = "content-length, content-range, etag, accept-ranges";
 
@@ -81,6 +96,16 @@ export function siteSlugFromPrefixSegment(prefixSegment) {
   const stagingMatch = STAGING_PREFIX_PATTERN.exec(prefixSegment);
   if (!stagingMatch) return prefixSegment;
   return stagingMatch[1];
+}
+
+// The live key a staging key stands for: "sg-acme/2026/11/x.png" -> "acme/2026/11/x.png".
+// keyPrefix is the key's first segment ("sg-acme"), slug the site slug ("acme"). Returns
+// null when the key carries no staging prefix (keyPrefix === slug: every branded-host key
+// and every plain shared-host key), so the caller has no second key to try.
+// Exported (like siteSlugFromPrefixSegment) purely so it is unit-testable.
+export function liveKeyForStagingKey(slug, keyPrefix, key) {
+  if (keyPrefix === slug) return null;
+  return slug + key.slice(keyPrefix.length);
 }
 
 // ── Bucket selection (per-site primary, shared-bucket fallback) ───────────────
@@ -367,7 +392,9 @@ async function fetchObjectFromBucket({ method, env, bucket, key, clientHeaders }
 // Translate the R2 S3 response into the exact response shape the old R2-binding
 // path produced. R2 has already applied the conditional/range semantics, so its
 // status IS the client status for the cases we serve.
-function buildClientResponse(upstream, method, key) {
+// cacheControlOverride (optional) replaces whatever cache-control the object carries; it is
+// used for a response served from the live key of a staging URL.
+function buildClientResponse(upstream, method, key, cacheControlOverride) {
   const status = upstream.status;
 
   // Missing object OR missing (unmigrated/unknown) bucket — R2 returns 404 for both
@@ -389,7 +416,7 @@ function buildClientResponse(upstream, method, key) {
   const upstreamEtag = upstream.headers.get("etag");
   if (upstreamEtag) headers.set("etag", upstreamEtag);
   const upstreamCacheControl = upstream.headers.get("cache-control");
-  headers.set("cache-control", upstreamCacheControl || IMMUTABLE_CACHE);
+  headers.set("cache-control", cacheControlOverride || upstreamCacheControl || IMMUTABLE_CACHE);
   headers.set("accept-ranges", "bytes");
   headers.set("access-control-expose-headers", EXPOSED_HEADERS);
 
@@ -415,6 +442,83 @@ function buildClientResponse(upstream, method, key) {
   const contentLength = upstream.headers.get("content-length");
   if (contentLength) headers.set("content-length", contentLength);
   return new Response(method === "HEAD" ? null : upstream.body, { status: 200, headers });
+}
+
+// Read one key: the per-site bucket first, the shared (legacy) bucket only as a fallback.
+// Returns the upstream response to hand to buildClientResponse. Run once for a normal
+// request, and up to twice for a staging "sg-" request (staging key, then live key).
+// logNotFound=false silences the "not-found-in-both-buckets" line: for a staging request a
+// miss on the staging key is the NORMAL case (every image copied from live), so the caller
+// logs one line for the whole staging-then-live lookup instead.
+async function readKeyFromSiteBuckets({ method, env, slug, key, clientHeaders, logNotFound }) {
+  // Per-site bucket first, shared (legacy) bucket only as a fallback — sites move
+  // into their own bucket one at a time, so both models have to serve at once.
+  const [primaryBucket, fallbackBucket] = bucketAttemptOrder(slug, env);
+
+  let upstream = await fetchObjectFromBucket({
+    method,
+    env,
+    bucket: primaryBucket,
+    key,
+    clientHeaders,
+  });
+
+  // COST: for a site that has NOT been migrated yet this is one extra upstream
+  // round-trip per request that reaches the Worker (the primary 404s/403s first).
+  // Accepted: it is a same-datacentre R2 request and repeat hits are absorbed by the
+  // long immutable Cache-Control on the eventual 200. A per-slug "migrated" flag in
+  // KV would remove the wasted attempt — deliberately NOT built yet (it adds a KV
+  // read on every request plus a write path to keep the flag in sync, so it is only
+  // worth it if the extra round-trip actually shows up in latency).
+  //
+  // The response cache is keyed on the PUBLIC url (media host + <slug>/<path>), never
+  // on which bucket answered — the same key holds byte-identical objects in both
+  // buckets — so migrating a site mid-cache cannot serve one site's object for
+  // another's URL. The only staleness window is the 60s negative cache: a 404 that
+  // was cached just before the object landed in the per-site bucket can persist for
+  // up to NOT_FOUND_CACHE.
+  if (fallbackBucket !== undefined && shouldFallbackToSharedBucket(upstream.status)) {
+    const primaryStatus = upstream.status;
+
+    // OBSERVABILITY (the fallback's one real hazard): a fallback 404 is served
+    // through the status===404 branch of buildClientResponse, so without this line a
+    // per-site read credential that is missing/unscoped/revoked would look exactly
+    // like "object doesn't exist" — a 60s-cached 404 with no signal in `wrangler
+    // tail`, indefinitely. Once the account-scoped read key is live a healthy
+    // MIGRATED site answers 200 from the primary, so a persistent stream of these
+    // warns is a genuine broken-credential alarm, not background noise.
+    if (primaryStatus === 401 || primaryStatus === 403) {
+      console.warn(
+        `[media-worker] fallback-auth-denied status=${primaryStatus} slug=${slug} ` +
+          `primary_bucket=${primaryBucket} key=${key}`,
+      );
+    }
+
+    // The discarded primary response is a small S3 error XML; its body is left
+    // unread (the runtime reclaims it) rather than cancelled, since a rejected
+    // cancel() inside this handler would turn a servable request into a 500.
+    upstream = await fetchObjectFromBucket({
+      method,
+      env,
+      bucket: fallbackBucket,
+      key,
+      clientHeaders,
+    });
+
+    // A genuinely missing object: present in neither bucket, and NOT an auth
+    // problem (a 401/403 primary already logged its own, distinct line above — the
+    // two cases stay greppable apart). Deliberately silent on the two healthy
+    // paths — primary 200, and primary 404 -> fallback 200 (every request from an
+    // unmigrated site) — so healthy traffic logs nothing.
+    if (logNotFound && primaryStatus === 404 && upstream.status === 404) {
+      console.warn(
+        `[media-worker] not-found-in-both-buckets slug=${slug} key=${key} ` +
+          `primary_bucket=${primaryBucket} fallback_bucket=${fallbackBucket}`,
+      );
+    }
+  }
+
+  return upstream;
 }
 
 export default {
@@ -481,71 +585,39 @@ export default {
         return internalError();
       }
 
-      // Per-site bucket first, shared (legacy) bucket only as a fallback — sites move
-      // into their own bucket one at a time, so both models have to serve at once.
-      const [primaryBucket, fallbackBucket] = bucketAttemptOrder(slug, env);
+      const liveKey = liveKeyForStagingKey(slug, keyPrefix, key);
+      const isStagingRequest = liveKey !== null;
 
-      let upstream = await fetchObjectFromBucket({
+      let upstream = await readKeyFromSiteBuckets({
         method,
         env,
-        bucket: primaryBucket,
+        slug,
         key,
         clientHeaders: request.headers,
+        logNotFound: !isStagingRequest,
       });
 
-      // COST: for a site that has NOT been migrated yet this is one extra upstream
-      // round-trip per request that reaches the Worker (the primary 404s/403s first).
-      // Accepted: it is a same-datacentre R2 request and repeat hits are absorbed by the
-      // long immutable Cache-Control on the eventual 200. A per-slug "migrated" flag in
-      // KV would remove the wasted attempt — deliberately NOT built yet (it adds a KV
-      // read on every request plus a write path to keep the flag in sync, so it is only
-      // worth it if the extra round-trip actually shows up in latency).
-      //
-      // The response cache is keyed on the PUBLIC url (media host + <slug>/<path>), never
-      // on which bucket answered — the same key holds byte-identical objects in both
-      // buckets — so migrating a site mid-cache cannot serve one site's object for
-      // another's URL. The only staleness window is the 60s negative cache: a 404 that
-      // was cached just before the object landed in the per-site bucket can persist for
-      // up to NOT_FOUND_CACHE.
-      if (fallbackBucket !== undefined && shouldFallbackToSharedBucket(upstream.status)) {
-        const primaryStatus = upstream.status;
-
-        // OBSERVABILITY (the fallback's one real hazard): a fallback 404 is served
-        // through the status===404 branch of buildClientResponse, so without this line a
-        // per-site read credential that is missing/unscoped/revoked would look exactly
-        // like "object doesn't exist" — a 60s-cached 404 with no signal in `wrangler
-        // tail`, indefinitely. Once the account-scoped read key is live a healthy
-        // MIGRATED site answers 200 from the primary, so a persistent stream of these
-        // warns is a genuine broken-credential alarm, not background noise.
-        if (primaryStatus === 401 || primaryStatus === 403) {
-          console.warn(
-            `[media-worker] fallback-auth-denied status=${primaryStatus} slug=${slug} ` +
-              `primary_bucket=${primaryBucket} key=${key}`,
-          );
-        }
-
-        // The discarded primary response is a small S3 error XML; its body is left
-        // unread (the runtime reclaims it) rather than cancelled, since a rejected
-        // cancel() inside this handler would turn a servable request into a 500.
-        upstream = await fetchObjectFromBucket({
+      // Staging live-key fallback: only after the staging key's whole read ended in a
+      // 404. A 5xx or a 401/403 must surface, not be masked by a second lookup.
+      if (isStagingRequest && upstream.status === 404) {
+        upstream = await readKeyFromSiteBuckets({
           method,
           env,
-          bucket: fallbackBucket,
-          key,
+          slug,
+          key: liveKey,
           clientHeaders: request.headers,
+          logNotFound: false,
         });
 
-        // A genuinely missing object: present in neither bucket, and NOT an auth
-        // problem (a 401/403 primary already logged its own, distinct line above — the
-        // two cases stay greppable apart). Deliberately silent on the two healthy
-        // paths — primary 200, and primary 404 -> fallback 200 (every request from an
-        // unmigrated site) — so healthy traffic logs nothing.
-        if (primaryStatus === 404 && upstream.status === 404) {
+        if (upstream.status === 404) {
           console.warn(
-            `[media-worker] not-found-in-both-buckets slug=${slug} key=${key} ` +
-              `primary_bucket=${primaryBucket} fallback_bucket=${fallbackBucket}`,
+            `[media-worker] not-found-under-staging-or-live-key slug=${slug} ` +
+              `staging_key=${key} live_key=${liveKey}`,
           );
         }
+
+        // Served from the live key: short cache (see LIVE_KEY_FALLBACK_CACHE).
+        return buildClientResponse(upstream, method, liveKey, LIVE_KEY_FALLBACK_CACHE);
       }
 
       return buildClientResponse(upstream, method, key);

@@ -368,3 +368,167 @@ test("trash under an sg- prefix is a 404 with no R2 call", async () => {
   assert.equal(response.status, 404);
   assert.equal(upstreamCalls.length, 0);
 });
+
+// orchestrator#84 / infra#151: a staging DB is a copy of live, so images copied from live are
+// requested as sg-<slug>/<path> but stored at <slug>/<path>. A staging miss reads the live key.
+const STAGING_URL = "https://media.doubleyoup.com/sg-acme/2026/11/x.png";
+const LIVE_CACHE = "public, max-age=300";
+
+test("sg- miss in the site bucket serves the live key with a short cache", async () => {
+  stubUpstream([
+    s3ErrorResponse(404, "NoSuchKey"), // staging key, per-site bucket
+    s3ErrorResponse(404, "NoSuchKey"), // staging key, shared bucket
+    objectResponse(200, { body: "LIVEBYTES", extraHeaders: { "cache-control": "public, max-age=31536000, immutable" } }),
+  ]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "LIVEBYTES");
+  assert.equal(response.headers.get("cache-control"), LIVE_CACHE);
+  assert.equal(upstreamCalls.length, 3);
+  assert.equal(bucketOf(upstreamCalls[2]), "doubleyoup-media-acme");
+  assert.equal(keyOfCall(upstreamCalls[2]), "acme/2026/11/x.png");
+  assert.deepEqual(warningsMatching(/not-found/), []);
+});
+
+test("sg- live-key read also falls back to the shared bucket", async () => {
+  stubUpstream([
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchBucket"), // live key, per-site bucket
+    objectResponse(200),
+  ]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), LIVE_CACHE);
+  assert.equal(upstreamCalls.length, 4);
+  assert.equal(bucketOf(upstreamCalls[3]), SHARED_BUCKET);
+  assert.equal(keyOfCall(upstreamCalls[3]), "acme/2026/11/x.png");
+});
+
+test("sg- key present is served from that key with no live-key read", async () => {
+  stubUpstream([objectResponse(200, { extraHeaders: { "cache-control": "public, max-age=31536000, immutable" } })]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(upstreamCalls.length, 1);
+  assert.equal(keyOfCall(upstreamCalls[0]), "sg-acme/2026/11/x.png");
+});
+
+test("sg- key served from the shared bucket makes no live-key read", async () => {
+  stubUpstream([s3ErrorResponse(404, "NoSuchKey"), objectResponse(200)]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamCalls.length, 2);
+  assert.equal(keyOfCall(upstreamCalls[1]), "sg-acme/2026/11/x.png");
+});
+
+test("sg- key and live key both absent is a 404 after exactly four R2 calls", async () => {
+  stubUpstream([
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchKey"),
+  ]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(upstreamCalls.length, 4);
+  assert.deepEqual(
+    upstreamCalls.map(keyOfCall),
+    ["sg-acme/2026/11/x.png", "sg-acme/2026/11/x.png", "acme/2026/11/x.png", "acme/2026/11/x.png"],
+  );
+  assert.equal(warningsMatching(/not-found-under-staging-or-live-key/).length, 1);
+  assert.deepEqual(warningsMatching(/not-found-in-both-buckets/), []);
+});
+
+test("a 5xx on the sg- key does not trigger the live-key read", async () => {
+  stubUpstream([s3ErrorResponse(503, "SlowDown")]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 500);
+  assert.equal(upstreamCalls.length, 1);
+});
+
+test("a 5xx from the shared bucket on the sg- key does not trigger the live-key read", async () => {
+  stubUpstream([s3ErrorResponse(404, "NoSuchKey"), s3ErrorResponse(503, "SlowDown")]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 500);
+  assert.equal(upstreamCalls.length, 2);
+});
+
+test("a 403 on both buckets for the sg- key does not trigger the live-key read", async () => {
+  stubUpstream([s3ErrorResponse(403, "AccessDenied"), s3ErrorResponse(403, "AccessDenied")]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 500);
+  assert.equal(upstreamCalls.length, 2);
+  assert.equal(warningsMatching(/fallback-auth-denied/).length, 1);
+});
+
+test("a 401 on both buckets for the sg- key does not trigger the live-key read", async () => {
+  stubUpstream([s3ErrorResponse(401, "Unauthorized"), s3ErrorResponse(401, "Unauthorized")]);
+
+  const response = await worker.fetch(new Request(STAGING_URL), ENV);
+
+  assert.equal(response.status, 500);
+  assert.equal(upstreamCalls.length, 2);
+});
+
+test("sg- trash and bare sg- are refused with no R2 call", async () => {
+  stubUpstream([]);
+
+  const trash = await worker.fetch(new Request("https://media.doubleyoup.com/sg-acme/trash/x"), ENV);
+  const bare = await worker.fetch(new Request("https://media.doubleyoup.com/sg-/x"), ENV);
+
+  assert.equal(trash.status, 404);
+  assert.equal(bare.status, 404);
+  assert.equal(upstreamCalls.length, 0);
+});
+
+test("an env-id-suffixed slug falls back to its live key", async () => {
+  stubUpstream([
+    s3ErrorResponse(404, "NoSuchKey"),
+    s3ErrorResponse(404, "NoSuchKey"),
+    objectResponse(200),
+  ]);
+
+  const response = await worker.fetch(new Request("https://media.doubleyoup.com/sg-docs-892769/2026/11/x.png"), ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(bucketOf(upstreamCalls[2]), "doubleyoup-media-docs-892769");
+  assert.equal(keyOfCall(upstreamCalls[2]), "docs-892769/2026/11/x.png");
+});
+
+test("a branded host miss makes exactly the same two reads as before", async () => {
+  const brandedEnv = { ...ENV, HOSTMAP: { get: async () => "acme" } };
+  stubUpstream([s3ErrorResponse(404, "NoSuchKey"), s3ErrorResponse(404, "NoSuchKey")]);
+
+  const response = await worker.fetch(new Request("https://media.customer.example/2026/11/x.png"), brandedEnv);
+
+  assert.equal(response.status, 404);
+  assert.equal(upstreamCalls.length, 2);
+  assert.deepEqual(upstreamCalls.map(keyOfCall), ["acme/2026/11/x.png", "acme/2026/11/x.png"]);
+  assert.equal(warningsMatching(/not-found-in-both-buckets/).length, 1);
+});
+
+test("a plain shared-host miss makes no live-key read", async () => {
+  stubUpstream([s3ErrorResponse(404, "NoSuchKey"), s3ErrorResponse(404, "NoSuchKey")]);
+
+  const response = await worker.fetch(new Request("https://media.doubleyoup.com/acme/2026/11/x.png"), ENV);
+
+  assert.equal(response.status, 404);
+  assert.equal(upstreamCalls.length, 2);
+});

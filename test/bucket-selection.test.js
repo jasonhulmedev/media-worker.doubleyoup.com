@@ -11,6 +11,7 @@ import {
   isTrashRequest,
   shouldFallbackToSharedBucket,
   siteSlugFromPrefixSegment,
+  liveKeyForStagingKey,
 } from "../src/index.js";
 
 const SLUG = "rareepicgamer-19f933";
@@ -93,4 +94,19 @@ test("siteSlugFromPrefixSegment strips a leading sg- and leaves other segments a
   assert.equal(siteSlugFromPrefixSegment("acme"), "acme");
   assert.equal(siteSlugFromPrefixSegment("sg-"), "");
   assert.equal(siteSlugFromPrefixSegment("xsg-acme"), "xsg-acme");
+});
+
+test("liveKeyForStagingKey maps sg-<slug>/<path> to <slug>/<path>", () => {
+  assert.equal(
+    liveKeyForStagingKey("acme", "sg-acme", "sg-acme/2026/11/x.png"),
+    "acme/2026/11/x.png",
+  );
+  assert.equal(
+    liveKeyForStagingKey("docs-892769", "sg-docs-892769", "sg-docs-892769/2026/11/x.png"),
+    "docs-892769/2026/11/x.png",
+  );
+});
+
+test("liveKeyForStagingKey returns null when the key has no staging prefix", () => {
+  assert.equal(liveKeyForStagingKey("acme", "acme", "acme/2026/11/x.png"), null);
 });
