@@ -578,15 +578,18 @@ export default {
       const sitePath = key.slice(keyPrefix.length + 1); // key is always "<prefix>/<path>"
       if (isTrashRequest(key, sitePath)) return notFound(method);
 
+      // The live-key mapping can turn "sg-trash/..." into the soft-delete namespace
+      // "trash/...". Refuse both keys before any R2 read, not only before the fallback.
+      const liveKey = liveKeyForStagingKey(slug, keyPrefix, key);
+      const isStagingRequest = liveKey !== null;
+      if (isStagingRequest && isTrashRequest(liveKey, sitePath)) return notFound(method);
+
       // Read credential is an Object-Read-ONLY R2 token held as a Worker secret (never
       // in a tenant container). Absent config => not live yet.
       if (!env.R2_ACCOUNT_ID || !env.R2_S3_KEY || !env.R2_S3_SECRET) {
         console.error("[media-worker] R2_ACCOUNT_ID / R2_S3_KEY / R2_S3_SECRET not configured");
         return internalError();
       }
-
-      const liveKey = liveKeyForStagingKey(slug, keyPrefix, key);
-      const isStagingRequest = liveKey !== null;
 
       let upstream = await readKeyFromSiteBuckets({
         method,

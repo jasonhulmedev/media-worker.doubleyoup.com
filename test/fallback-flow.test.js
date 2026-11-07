@@ -498,6 +498,30 @@ test("sg- trash and bare sg- are refused with no R2 call", async () => {
   assert.equal(upstreamCalls.length, 0);
 });
 
+test("sg-trash is refused with no R2 call, so the live-key fallback cannot reach a soft-deleted object", async () => {
+  stubUpstream([]);
+
+  const response = await worker.fetch(
+    new Request("https://media.doubleyoup.com/sg-trash/2026-11-02/acme/logo.png"),
+    ENV,
+  );
+  const headResponse = await worker.fetch(
+    new Request("https://media.doubleyoup.com/sg-trash/2026-11-02/acme/logo.png", { method: "HEAD" }),
+    ENV,
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(await response.text(), "Not found");
+  assert.equal(headResponse.status, 404);
+  assert.equal(headResponse.headers.get("cache-control"), "public, max-age=60");
+  assert.equal(headResponse.headers.get("access-control-allow-origin"), "*");
+  assert.equal(await headResponse.text(), "");
+  assert.equal(upstreamCalls.length, 0, "both keys must pass the trash refusal before any R2 read");
+  assert.deepEqual(warnings, [], "the refusal is the expected path, not an alarm");
+});
+
 test("an env-id-suffixed slug falls back to its live key", async () => {
   stubUpstream([
     s3ErrorResponse(404, "NoSuchKey"),
