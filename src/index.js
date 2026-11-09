@@ -537,10 +537,9 @@ export default {
         return badRequest(method); // malformed percent-encoding
       }
 
-      // Defence in depth: R2 keys are opaque strings, so ".." can't actually
-      // escape a "directory" the way it would on a filesystem — but never
-      // let a traversal-looking key through regardless.
-      if (path.split("/").includes("..")) return notFound(method);
+      // Decoding can introduce dot segments that fetch() would normalize away,
+      // so refuse them before the checks and the signed R2 URL can see different keys.
+      if (path.split("/").some((segment) => segment === "." || segment === "..")) return notFound(method);
 
       const sharedHost = (env.SHARED_HOST || "media.doubleyoup.com").toLowerCase();
 

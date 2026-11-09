@@ -238,6 +238,46 @@ test("branded hosts get the same fallback, with the slug from HOSTMAP", async ()
   assert.ok(upstreamCalls[1].url.endsWith(`/${SHARED_BUCKET}/${SLUG}/${OBJECT_PATH}`));
 });
 
+const dotSegmentRoutes = [
+  { name: "shared host", baseUrl: `https://media.doubleyoup.com/${SLUG}` },
+  { name: "staging shared host", baseUrl: `https://media.doubleyoup.com/sg-${SLUG}` },
+  { name: "branded host", baseUrl: "https://media.rareepicgamer.zone" },
+];
+
+for (const route of dotSegmentRoutes) {
+  for (const encodedSegment of ["%2e%2f", "%2e%2e%2f"]) {
+    for (const method of ["GET", "HEAD"]) {
+      test(`${method} ${route.name} refuses decoded ${encodedSegment} before any R2 read`, async () => {
+        stubUpstream([]);
+        const env = { ...ENV, HOSTMAP: { get: async () => SLUG } };
+        const request = new Request(`${route.baseUrl}/${encodedSegment}trash/2026-11-02/${OBJECT_PATH}`, { method });
+
+        const response = await worker.fetch(request, env);
+
+        assert.equal(response.status, 404);
+        assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+        assert.equal(response.headers.get("access-control-allow-origin"), "*");
+        const expectedBody = method === "HEAD" ? "" : "Not found";
+        assert.equal(await response.text(), expectedBody);
+        assert.equal(upstreamCalls.length, 0, "dot segments must be refused before signing or reading a key");
+        assert.deepEqual(warnings, [], "the refusal is the expected path, not an alarm");
+      });
+    }
+  }
+}
+
+test("an encoded dot inside a filename still reads the literal media key", async () => {
+  stubUpstream([objectResponse(200)]);
+  const request = new Request(`https://media.doubleyoup.com/${SLUG}/2025/08/photo%2ejpg`);
+
+  const response = await worker.fetch(request, ENV);
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "IMAGEBYTES");
+  assert.equal(upstreamCalls.length, 1);
+  assert.equal(new URL(upstreamCalls[0].url).pathname, `/${PER_SITE_BUCKET}/${SLUG}/${OBJECT_PATH}`);
+});
+
 // hub#222 soft delete: a request that resolves into trash/ is refused with the plain
 // 404 (60s negative cache) BEFORE the first R2 read, on the shared host and on
 // branded hosts. stubUpstream([]) queues no canned response, so any upstream call
