@@ -9,7 +9,11 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "test": "node --test"
+    "test": "node --test",
+    "semgrep:test": "semgrep test .policy-as-code/.semgrep",
+    "semgrep:policy": "semgrep scan --config .policy-as-code/.semgrep --error --metrics=off",
+    "conftest": "sh scripts/conftest.sh",
+    "conftest:test": "sh scripts/conftest.sh verify"
   },
   "devDependencies": {
     "wrangler": "^4.55.0"

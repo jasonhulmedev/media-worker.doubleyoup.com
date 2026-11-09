@@ -1,0 +1,16 @@
+rules:
+  - id: dy-path-check-misses-single-dot-segment
+    message: >-
+      The path check refuses ".." segments but not "." segments. After decodeURIComponent,
+      `%2e` becomes ".", and the URL parser in fetch() then drops "./" from the signed R2
+      path, so the request reads a different key than the one the checks saw (security
+      review media-worker#3). Refuse both: `segments.some((segment) => segment === "." || segment === "..")`.
+    severity: WARNING
+    languages: [javascript]
+    paths:
+      exclude:
+        - "*.test.js"
+    patterns:
+      - pattern: $PATH.split("/").includes("..")
+      - pattern-not-inside: $PATH.split("/").includes(".") || $PATH.split("/").includes("..")
+      - pattern-not-inside: $PATH.split("/").includes("..") || $PATH.split("/").includes(".")

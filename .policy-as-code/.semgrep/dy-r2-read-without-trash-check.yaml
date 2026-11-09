@@ -1,0 +1,25 @@
+rules:
+  - id: dy-r2-read-without-trash-check
+    message: >-
+      An R2 read uses a key that was not checked with isTrashRequest() first. Soft-deleted
+      media lives under trash/<date>/<key> and must never be served. A derived key (for
+      example the live key of a sg-<slug> staging request) can land in trash/ even when the
+      request key does not (media-worker#14). Refuse with
+      `if (isTrashRequest(<key>, sitePath)) return notFound(method);` before the read.
+    severity: ERROR
+    languages: [javascript]
+    paths:
+      include:
+        - "/src/"
+      exclude:
+        - "*.test.js"
+    patterns:
+      - pattern-either:
+          - pattern: "readKeyFromSiteBuckets({..., key: $KEY, ...})"
+          - pattern: "fetchObjectFromBucket({..., key: $KEY, ...})"
+      # readKeyFromSiteBuckets() itself passes its own key parameter on to fetchObjectFromBucket().
+      - pattern-not-inside: |
+          async function readKeyFromSiteBuckets(...) { ... }
+      - pattern-not-inside: |
+          if (<... isTrashRequest($KEY, ...) ...>) return $REFUSAL;
+          ...
