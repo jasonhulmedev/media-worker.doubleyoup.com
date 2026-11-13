@@ -1,0 +1,2 @@
+# Rule fixtures contain deliberate violations; semgrep test checks them separately.
+.policy-as-code/
